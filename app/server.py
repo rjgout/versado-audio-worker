@@ -260,7 +260,7 @@ def jobs():
             spoken='Dit is de uitspraak van ' + rule['replacement'] + '.'
             used=[{'id':rule['id'],'version':rule['version'],'original':rule['original'],'replacement':rule['replacement']}]
         jid=uuid.uuid4().hex
-        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps({'total_steps':12,'speed':1.0}),json.dumps(used),label,'queued',int(preview)))
+        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps({'steps':12,'speed':1.0} if engine == 'supertonic' else {'total_steps':12,'speed':1.0}),json.dumps(used),label,'queued',int(preview)))
         return {'id':jid},202
 
 @app.get('/api/previews/<jid>')
