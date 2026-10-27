@@ -74,7 +74,7 @@ def test_supertonic_request(monkeypatch):
     def post(url,**kwargs): seen.update(url=url,**kwargs); return Response()
     monkeypatch.setattr(engines.requests,'post',post)
     assert engines.synthesize('supertonic','F1','Hallo') == b'WAV'
-    assert seen['json']=={'text':'Hallo','voice':'F1','lang':'nl','total_steps':12,'speed':1.0}
+    assert seen['json']=={'text':'Hallo','voice':'F1','lang':'nl','steps':12,'speed':1.0}
     with pytest.raises(ValueError): engines.synthesize('supertonic','wrong','Hallo')
 
 def test_piper_protocol(monkeypatch):
