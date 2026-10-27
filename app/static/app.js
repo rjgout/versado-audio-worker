@@ -11,15 +11,103 @@ $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location
 $('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices()};$('#voice').onchange=()=>localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);$('#source').onchange=()=>renderRules();
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id of ['lab','dictionary'])$('#'+id).hidden=id!==b.dataset.tab});
 $('#generate').onsubmit=async e=>{e.preventDefault();try{await api('/api/jobs',{method:'POST',body:JSON.stringify({...selection(),text:$('#text').value,label:$('#label').value})});msg('Opdracht toegevoegd aan de wachtrij.');await refresh()}catch(e){msg(e)}};
-async function refresh(){if($('#workspace').hidden)return;try{let jobs=await api('/api/jobs');$('#jobs').innerHTML=jobs.map(j=>`<article class="item"><h3>${esc(j.label||'Naamloze opname')}</h3><p class="muted">${esc(j.engine)} · ${esc(j.voice)} · ${esc(j.created_at)} · ${esc(j.status)} ${esc(j.error||'')}</p>${j.status==='done'?`<audio controls preload="none" src="/api/jobs/${j.id}/audio"></audio><a class="download" href="/api/jobs/${j.id}/audio?download=1">WAV downloaden</a>`:''}<details><summary>Tekst en instellingen</summary><p>Origineel: ${esc(j.original)}</p><p>Uitgesproken: ${esc(j.spoken)}</p><pre>${esc(j.settings)}\n${esc(j.rules)}</pre></details><button onclick="renameJob('${j.id}')">Label wijzigen</button>${!['queued','running'].includes(j.status)?`<button onclick="deleteJob('${j.id}')">Verwijderen</button>`:''}</article>`).join('')||'<p>Nog geen opnamen.</p>';allRules=await api('/api/rules');renderRules()}catch(e){msg(e)}}
+// Keep media elements and details nodes attached across background updates.
+const jobCards = new Map(), ruleCards = new Map();
+function updateJobs(jobs){
+  const container=$('#jobs'), ids=new Set(jobs.map(j=>String(j.id)));
+  for(const [id, card] of jobCards) if(!ids.has(id)){card.remove();jobCards.delete(id)}
+  let empty=container.querySelector('.empty-jobs');
+  if(!jobs.length){if(!empty){empty=document.createElement('p');empty.className='empty-jobs';empty.textContent='Nog geen opnamen.';container.append(empty)}return}
+  if(empty)empty.remove();
+  // Insert only new cards. Moving existing audio nodes can interrupt playback.
+  for(const j of [...jobs].reverse()){
+    const id=String(j.id); let card=jobCards.get(id);
+    if(!card){
+      card=document.createElement('article');card.className='item';card.dataset.jobId=id;
+      card.innerHTML='<h3></h3><p class="muted"></p><div class="job-audio"></div><details><summary>Tekst en instellingen</summary><p class="original"></p><p class="spoken"></p><pre></pre></details><button class="rename">Label wijzigen</button><button class="delete">Verwijderen</button>';
+      card.querySelector('.rename').onclick=()=>window.renameJob(id);
+      card.querySelector('.delete').onclick=()=>window.deleteJob(id);
+      container.prepend(card);jobCards.set(id,card);
+    }
+    card.querySelector('h3').textContent=j.label||'Naamloze opname';
+    card.querySelector('.muted').textContent=`${j.engine} · ${j.voice} · ${j.created_at} · ${j.status} ${j.error||''}`;
+    card.querySelector('.original').textContent='Origineel: '+j.original;
+    card.querySelector('.spoken').textContent='Uitgesproken: '+j.spoken;
+    card.querySelector('pre').textContent=j.settings+'\n'+j.rules;
+    card.querySelector('.delete').hidden=['queued','running'].includes(j.status);
+    const area=card.querySelector('.job-audio');
+    if(j.status==='done'&&!area.querySelector('audio')){
+      const audio=document.createElement('audio');audio.controls=true;audio.preload='none';audio.src='/api/jobs/'+encodeURIComponent(id)+'/audio';
+      const download=document.createElement('a');download.className='download';download.href=audio.src+'?download=1';download.textContent='WAV downloaden';area.append(audio,download);
+    }
+  }
+}
+let refreshRunning=false, refreshPending=false, refreshVersion=0;
+async function refresh(poll=false){
+  if($('#workspace').hidden||(poll&&refreshRunning))return;
+  refreshPending=true;refreshVersion++;
+  if(refreshRunning)return;
+  refreshRunning=true;
+  try{
+    while(refreshPending){
+      refreshPending=false;const version=refreshVersion;
+      try{
+        const [jobs,rules]=await Promise.all([api('/api/jobs'),api('/api/rules')]);
+        if(version!==refreshVersion)continue;
+        updateJobs(jobs);allRules=rules;renderRules();
+      }catch(e){if(version===refreshVersion)msg(e)}
+    }
+  }finally{refreshRunning=false}
+}
 window.renameJob=async id=>{let label=prompt('Nieuw label');if(label!==null){try{await api('/api/jobs/'+id,{method:'PATCH',body:JSON.stringify({label})});refresh()}catch(e){msg(e)}}};window.deleteJob=async id=>{if(confirm('Deze opname definitief verwijderen?')){try{await api('/api/jobs/'+id,{method:'DELETE'});refresh()}catch(e){msg(e)}}};
-function renderRules(){let q=$('#search').value.toLowerCase();$('#rules').innerHTML=allRules.filter(r=>r.language==='nl'&&r.source===$('#source').value&&r.original.toLowerCase().includes(q)).map(r=>`<article class="item"><h3>${esc(r.original)} → ${esc(r.replacement)}</h3><p class="muted">${esc(r.status)} · versie ${r.version} ${esc(r.note)} ${esc(r.engine||'')} ${esc(r.voice||'')}</p><button onclick="playRule(${r.id})">▶ Beluisteren</button><button onclick="editRule(${r.id})">Bewerken</button><button onclick="ruleAction(${r.id},'approve')">Goedkeuren</button><button onclick="ruleAction(${r.id},'deactivate')">Deactiveren</button><button onclick="historyRule(${r.id})">Geschiedenis</button><button onclick="deleteRule(${r.id})">Verwijderen</button><div id="history-${r.id}"></div></article>`).join('')}
+function renderRules(){
+  const container=$('#rules'), ids=new Set(allRules.map(r=>String(r.id)));
+  for(const [id,card] of ruleCards)if(!ids.has(id)){card.remove();ruleCards.delete(id)}
+  const q=$('#search').value.toLowerCase();
+  for(const r of allRules){
+    const id=String(r.id);let card=ruleCards.get(id);
+    if(!card){
+      card=document.createElement('article');card.className='item';card.dataset.ruleId=id;
+      card.innerHTML='<h3></h3><p class="muted"></p><button class="play">▶ Beluisteren</button><button class="edit">Bewerken</button><button class="approve">Goedkeuren</button><button class="deactivate">Deactiveren</button><button class="history">Geschiedenis</button><button class="delete">Verwijderen</button><div class="history-content"></div>';
+      card.querySelector('.history-content').id='history-'+id;
+      card.querySelector('.play').onclick=()=>window.playRule(r.id);
+      card.querySelector('.edit').onclick=()=>window.editRule(r.id);
+      card.querySelector('.approve').onclick=()=>window.ruleAction(r.id,'approve');
+      card.querySelector('.deactivate').onclick=()=>window.ruleAction(r.id,'deactivate');
+      card.querySelector('.history').onclick=()=>window.historyRule(r.id);
+      card.querySelector('.delete').onclick=()=>window.deleteRule(r.id);
+      container.append(card);ruleCards.set(id,card);
+    }
+    card.hidden=!(r.language==='nl'&&r.source===$('#source').value&&r.original.toLowerCase().includes(q));
+    card.querySelector('h3').textContent=r.original+' → '+r.replacement;
+    card.querySelector('.muted').textContent=`${r.status} · versie ${r.version} ${r.note||''} ${r.engine||''} ${r.voice||''}`;
+  }
+}
 $('#search').oninput=renderRules;$('#clear').onclick=()=>{$('#ruleform').reset();$('#ruleid').value=''};
 $('#ruleform').onsubmit=async e=>{e.preventDefault();let id=$('#ruleid').value;try{await api('/api/rules'+(id?'/'+id:''),{method:id?'PUT':'POST',body:JSON.stringify({...selection(),engine:$('#ruleengine').value||null,voice:$('#rulevoice').value||null,original:$('#original').value,replacement:$('#replacement').value,note:$('#note').value})});$('#clear').click();await refresh()}catch(e){msg(e)}};
 window.editRule=id=>{let r=allRules.find(r=>r.id===id);$('#ruleid').value=id;$('#original').value=r.original;$('#replacement').value=r.replacement;$('#note').value=r.note;$('#ruleengine').value=r.engine||'';updateRuleVoices();$('#rulevoice').value=r.voice||'';window.scrollTo(0,0)};
 window.ruleAction=async(id,action)=>{try{await api('/api/rules/'+id,{method:'PUT',body:JSON.stringify({action})});refresh()}catch(e){msg(e)}};window.deleteRule=async id=>{if(confirm('Deze uitspraak verwijderen?')){try{await api('/api/rules/'+id,{method:'DELETE'});refresh()}catch(e){msg(e)}}};window.historyRule=async id=>{try{let h=await api('/api/rules/'+id+'/history');$('#history-'+id).innerHTML='<pre>'+esc(JSON.stringify(h,null,2))+'</pre>'}catch(e){msg(e)}};
-window.playRule=async id=>{try{let r=allRules.find(x=>x.id===id);let job=await api('/api/previews',{method:'POST',body:JSON.stringify({...selection(),text:'Dit is de uitspraak van '+r.original+'.',label:'Uitspraaktest',test_rule:id})});msg('Uitspraaktest staat in de wachtrij.');let timer=setInterval(async()=>{let j=await api('/api/previews/'+job.id);if(j&&j.status==='done'){clearInterval(timer);let el=document.createElement('audio');el.controls=true;el.src='/api/jobs/'+j.id+'/audio';$('#history-'+id).replaceChildren(el);el.play().catch(()=>{})}if(j&&j.status==='failed'){clearInterval(timer);msg(j.error)}},2000)}catch(e){msg(e)}};
-load();setInterval(refresh,4000);
+const previewRequests=new Map();
+window.playRule=async id=>{
+  const requestId=(previewRequests.get(id)||0)+1;previewRequests.set(id,requestId);
+  try{
+    const r=allRules.find(x=>x.id===id);if(!r)return;
+    const job=await api('/api/previews',{method:'POST',body:JSON.stringify({...selection(),text:'Dit is de uitspraak van '+r.original+'.',label:'Uitspraaktest',test_rule:id})});
+    msg('Uitspraaktest staat in de wachtrij.');
+    while(previewRequests.get(id)===requestId){
+      await new Promise(resolve=>setTimeout(resolve,2000));
+      if(previewRequests.get(id)!==requestId)return;
+      const j=await api('/api/previews/'+job.id);
+      if(previewRequests.get(id)!==requestId)return;
+      if(j.status==='done'){
+        const target=document.getElementById('history-'+id);if(!target)return;
+        const el=document.createElement('audio');el.controls=true;el.src='/api/jobs/'+encodeURIComponent(j.id)+'/audio';target.replaceChildren(el);el.play().catch(()=>{});return;
+      }
+      if(j.status==='failed'){msg(j.error);return}
+    }
+  }catch(e){if(previewRequests.get(id)===requestId)msg(e)}
+};
+load();setInterval(()=>refresh(true),4000);
 
 function updateRuleVoices(){let engine=$('#ruleengine').value;$('#rulevoice').innerHTML='<option value="">Alle stemmen</option>'+(engine?(voices[engine]||[]).map(v=>`<option>${esc(v)}</option>`).join(''):'')}
 $('#ruleengine').onchange=updateRuleVoices;
