@@ -5,10 +5,12 @@ on:
     branches: [main]
 permissions:
   contents: read
-  packages: write
 jobs:
   verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,8 +31,12 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name == 'pull_request' }}
           tags: |
             ghcr.io/rjgout/versado-audio-worker:latest
             ghcr.io/rjgout/versado-audio-worker:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Container smoke test (no TTS engines)
+        if: github.event_name == 'pull_request'
+        run: python scripts/smoke.py

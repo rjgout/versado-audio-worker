@@ -11,6 +11,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv('SECRET_KEY', 'a' * 40)
     monkeypatch.setenv('PASSWORD_HASH', generate_password_hash('test-password'))
     monkeypatch.setenv('START_WORKER', '0')
+    models = tmp_path / 'models'
+    models.mkdir()
+    (models / 'nl_NL-ronnie-medium.onnx').touch()
+    (models / 'nl_NL-ronnie-medium.onnx.json').touch()
+    monkeypatch.setenv('PIPER_MODELS_DIR', str(models))
     import app.server
     module = importlib.reload(app.server)
     module.app.config['TESTING'] = True
@@ -81,3 +86,14 @@ def test_piper_protocol(monkeypatch):
     monkeypatch.setattr(engines,'AsyncTcpClient',Client)
     data=engines.synthesize('piper','nl_NL-ronnie-medium','Hallo')
     with wave.open(io.BytesIO(data),'rb') as wav: assert wav.getnframes()==1
+
+
+def test_import_preview_and_regional_language(client):
+    _, c = client; h = login(c)
+    rows = '[{"language":"fr-FR","source":"bible","original":"Nom","replacement":"Nomme"}]'
+    preview = c.post('/api/rules/import/preview',json={'format':'json','content':rows},headers=h)
+    assert preview.status_code == 200 and not preview.json[0]['duplicate']
+    assert c.post('/api/rules/import',json={'rows':preview.json},headers=h).json['imported']==1
+    assert c.post('/api/rules/import',json={'rows':preview.json},headers=h).json['imported']==0
+    assert any(r['language']=='fr-FR' and r['status']=='proposal' for r in c.get('/api/rules').json)
+    assert c.post('/api/jobs',json={'engine':'supertonic','voice':'M1','source':'bible','language':'fr-FR','text':'Nom'},headers=h).status_code==202

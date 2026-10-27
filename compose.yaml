@@ -12,6 +12,7 @@ services:
       PIPER_HOST: piper
       SUPERTONIC_URL: http://supertonic:8000
     volumes:
+      - /volume1/docker/versado-audio-worker/models:/data/models:ro
       - /volume1/docker/versado-audio-worker/tests:/data/tests
       - /volume1/docker/versado-audio-worker/pronunciation:/data/pronunciation
     mem_limit: ${APP_MEMORY:-512m}
@@ -19,7 +20,7 @@ services:
   piper:
     image: rhasspy/wyoming-piper:2.5.2
     restart: unless-stopped
-    command: ["--voice", "nl_NL-ronnie-medium", "--data-dir", "/data", "--download-dir", "/data", "--uri", "tcp://0.0.0.0:10200"]
+    command: ["--voice", "nl_NL-ronnie-medium", "--data-dir", "/data", "--download-dir", "/data", "--uri", "tcp://0.0.0.0:10200", "--local-files-only"]
     volumes:
       - /volume1/docker/versado-audio-worker/models:/data
     mem_limit: ${PIPER_MEMORY:-2g}

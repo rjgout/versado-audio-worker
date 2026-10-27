@@ -1,4 +1,7 @@
 import hmac
+import re
+import csv
+import io
 import json
 import os
 from pathlib import Path
@@ -67,6 +70,18 @@ def payload():
         abort(400, 'Ongeldige JSON')
     return value
 
+def valid_language(value):
+    return isinstance(value, str) and bool(re.fullmatch(r'(nl|en|de|fr|es)(?:-[A-Za-z0-9]{2,8})*', value))
+
+def available_voices():
+    root = Path(os.getenv('PIPER_MODELS_DIR', '/data/models'))
+    installed = set()
+    if root.exists():
+        for model in root.rglob('*.onnx'):
+            if model.with_name(model.name + '.json').is_file():
+                installed.add(model.stem)
+    return {'piper': [v for v in VOICES['piper'] if v in installed], 'supertonic': VOICES['supertonic']}
+
 def bounded(v, name, maximum, required=True):
     if not isinstance(v, str) or len(v) > maximum or (required and not v.strip()):
         abort(400, f'Ongeldige {name}')
@@ -108,7 +123,7 @@ def logout():
 @app.get('/api/voices')
 @protected
 def voices():
-    return VOICES
+    return available_voices()
 
 @app.route('/api/rules', methods=['GET','POST'])
 @protected
@@ -123,8 +138,7 @@ def rules():
 
 def validate_rule(p):
     language = bounded(p.get('language', 'nl'), 'taal', 16)
-    import re
-    if not re.fullmatch(r'(nl|en|de|fr|es)(-[A-Za-z0-9]{2,8})*', language): abort(400, 'Ongeldige taal')
+    if not valid_language(language): abort(400, 'Ongeldige taal')
     source = p.get('source')
     if source not in ('bofm','bible'): abort(400, 'Ongeldige bron')
     engine = p.get('engine') or None
@@ -132,6 +146,56 @@ def validate_rule(p):
     if engine and engine not in VOICES: abort(400, 'Ongeldig model')
     if voice and (not engine or voice not in VOICES[engine]): abort(400, 'Ongeldige stem')
     return (language, source, bounded(p.get('original'), 'woord', 120), bounded(p.get('replacement'), 'uitspraak', 120), engine, voice, bounded(p.get('note',''), 'toelichting', 1000, False))
+
+
+@app.post('/api/rules/import/preview')
+@protected
+def import_preview():
+    p = payload()
+    fmt = p.get('format')
+    text = bounded(p.get('content'), 'import', 200000)
+    try:
+        if fmt == 'json':
+            rows = json.loads(text)
+        elif fmt == 'csv':
+            rows = list(csv.DictReader(io.StringIO(text)))
+        else:
+            abort(400, 'Gebruik CSV of JSON')
+        if not isinstance(rows, list) or len(rows) > 500:
+            abort(400, 'Maximaal 500 regels')
+    except (ValueError, csv.Error):
+        abort(400, 'Ongeldig importbestand')
+    result = []
+    seen = set()
+    with db() as c:
+        for row in rows:
+            if not isinstance(row, dict) or not row.get('language') or not row.get('source'):
+                abort(400, 'Taal en schriftbron zijn verplicht')
+            d = validate_rule(row)
+            key = tuple((x or '').casefold() for x in (d[0],d[1],d[2],d[4],d[5]))
+            duplicate = key in seen or c.execute("SELECT 1 FROM rules WHERE deleted=0 AND language=? AND source=? AND lower(original)=lower(?) AND coalesce(engine,'')=? AND coalesce(voice,'')=?", (d[0],d[1],d[2],d[4] or '',d[5] or '')).fetchone() is not None
+            seen.add(key)
+            result.append({'language':d[0], 'source':d[1], 'original':d[2], 'replacement':d[3], 'engine':d[4], 'voice':d[5], 'note':d[6], 'duplicate':duplicate})
+    return jsonify(result)
+
+@app.post('/api/rules/import')
+@protected
+def import_rules():
+    p = payload()
+    rows = p.get('rows')
+    if not isinstance(rows, list) or len(rows) > 500: abort(400)
+    count = 0
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        for row in rows:
+            if not isinstance(row, dict) or not row.get('language') or not row.get('source'): abort(400)
+            d = validate_rule(row)
+            if c.execute("SELECT 1 FROM rules WHERE deleted=0 AND language=? AND source=? AND lower(original)=lower(?) AND coalesce(engine,'')=? AND coalesce(voice,'')=?", (d[0],d[1],d[2],d[4] or '',d[5] or '')).fetchone():
+                continue
+            cur = c.execute('INSERT INTO rules(language,source,original,replacement,engine,voice,note,status,version) VALUES(?,?,?,?,?,?,?,?,1)', (*d, 'proposal'))
+            history(c,cur.lastrowid)
+            count += 1
+    return {'imported':count}
 
 @app.route('/api/rules/<int:rid>', methods=['PUT','DELETE'])
 @protected
@@ -167,9 +231,9 @@ def jobs():
             return jsonify([dict(x) for x in c.execute('SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT 500')])
         p=payload()
         engine=p.get('engine'); voice=p.get('voice')
-        if voice not in VOICES.get(engine,[]): abort(400,'Ongeldige stem')
+        if voice not in available_voices().get(engine,[]): abort(400,'Stem is niet geïnstalleerd of onbekend')
         language=p.get('language','nl'); source=p.get('source','bofm')
-        if source not in ('bofm','bible') or language not in ('nl','en','de','fr','es'): abort(400)
+        if source not in ('bofm','bible') or not valid_language(language): abort(400)
         original=bounded(p.get('text'),'tekst',20000)
         label=bounded(p.get('label',''),'label',200,False)
         if c.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 25: abort(429,'Wachtrij is vol')
