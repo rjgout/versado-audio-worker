@@ -14,7 +14,7 @@ def synthesize(engine, voice, text, language='nl'):
         raise ValueError('Onbekend model of stem')
     if engine == 'supertonic':
         import os
-        response = requests.post(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/tts', json={'text': text, 'voice': voice, 'lang': language.split('-')[0], 'total_steps': 12, 'speed': 1.0}, timeout=(10, 1800))
+        response = requests.post(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/tts', json={'text': text, 'voice': voice, 'lang': language.split('-')[0], 'steps': 12, 'speed': 1.0}, timeout=(10, 1800))
         response.raise_for_status()
         return response.content
     return asyncio.run(_piper(voice, text))
