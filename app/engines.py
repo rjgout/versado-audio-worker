@@ -7,7 +7,7 @@ from wyoming.client import AsyncTcpClient
 from wyoming.tts import Synthesize, SynthesizeVoice
 from wyoming.audio import AudioStart, AudioChunk, AudioStop
 
-VOICES = {'piper': ['nl_NL-ronnie-medium', 'nl_NL-pim-medium', 'nl_NL-alex-medium', 'nl_NL-mls-medium', 'nl_NL-nathalie-medium', 'nl_NL-rdh-medium'], 'supertonic': [f'{s}{n}' for s in 'MF' for n in range(1, 6)]}
+VOICES = {'piper': ['nl_NL-ronnie-medium', 'nl_NL-pim-medium', 'nl_NL-alex-medium', 'nl_NL-mls-medium', 'nl_BE-nathalie-medium', 'nl_BE-rdh-medium'], 'supertonic': [f'{s}{n}' for s in 'MF' for n in range(1, 6)]}
 
 def synthesize(engine, voice, text, language='nl'):
     if voice not in VOICES.get(engine, []):

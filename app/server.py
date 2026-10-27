@@ -14,6 +14,7 @@ import wave
 from functools import wraps
 
 from flask import Flask, abort, jsonify, request, send_file, session, render_template
+import requests
 from werkzeug.security import check_password_hash
 from app.engines import VOICES, synthesize
 from app.pronunciation import Rule, prepare
@@ -45,6 +46,9 @@ def init():
         CREATE TABLE IF NOT EXISTS rule_history(id INTEGER PRIMARY KEY, rule_id INTEGER NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL, changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, original TEXT NOT NULL, spoken TEXT NOT NULL, engine TEXT NOT NULL, voice TEXT NOT NULL, language TEXT NOT NULL, source TEXT NOT NULL, settings TEXT NOT NULL, rules TEXT NOT NULL, label TEXT NOT NULL, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, audio TEXT);
         ''')
+        if 'is_preview' not in [r['name'] for r in c.execute('PRAGMA table_info(jobs)')]:
+            c.execute('ALTER TABLE jobs ADD COLUMN is_preview INTEGER NOT NULL DEFAULT 0')
+            c.execute('UPDATE schema_version SET version=2')
         if not c.execute('SELECT 1 FROM rules WHERE id=1').fetchone():
             c.execute("INSERT INTO rules(id,language,source,original,replacement,status,version) VALUES(1,'nl','bofm','Nephi','Nefi','approved',1)")
             history(c, 1)
@@ -80,7 +84,14 @@ def available_voices():
         for model in root.rglob('*.onnx'):
             if model.with_name(model.name + '.json').is_file():
                 installed.add(model.stem)
-    return {'piper': [v for v in VOICES['piper'] if v in installed], 'supertonic': VOICES['supertonic']}
+    try:
+        response = requests.get(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/styles', timeout=2)
+        response.raise_for_status()
+        advertised = {item['name'] for item in response.json()['styles'] if isinstance(item, dict) and isinstance(item.get('name'), str)}
+        supertonic = [v for v in VOICES['supertonic'] if v in advertised]
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        supertonic = []
+    return {'piper': [v for v in VOICES['piper'] if v in installed], 'supertonic': supertonic}
 
 def bounded(v, name, maximum, required=True):
     if not isinstance(v, str) or len(v) > maximum or (required and not v.strip()):
@@ -223,13 +234,16 @@ def rule_history(rid):
     with db() as c:
         return jsonify([dict(x) for x in c.execute('SELECT version,snapshot,changed_at FROM rule_history WHERE rule_id=? ORDER BY version DESC',(rid,))])
 
+@app.route('/api/previews', methods=['POST'])
 @app.route('/api/jobs', methods=['GET','POST'])
 @protected
 def jobs():
     with db() as c:
         if request.method == 'GET':
-            return jsonify([dict(x) for x in c.execute('SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT 500')])
+            return jsonify([dict(x) for x in c.execute('SELECT * FROM jobs WHERE is_preview=0 ORDER BY created_at DESC, rowid DESC LIMIT 500')])
         p=payload()
+        preview = request.path == '/api/previews'
+        if preview != bool(p.get('test_rule')): abort(400, 'Ongeldige preview')
         engine=p.get('engine'); voice=p.get('voice')
         if voice not in available_voices().get(engine,[]): abort(400,'Stem is niet geïnstalleerd of onbekend')
         language=p.get('language','nl'); source=p.get('source','bofm')
@@ -246,8 +260,24 @@ def jobs():
             spoken='Dit is de uitspraak van ' + rule['replacement'] + '.'
             used=[{'id':rule['id'],'version':rule['version'],'original':rule['original'],'replacement':rule['replacement']}]
         jid=uuid.uuid4().hex
-        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps({'total_steps':12,'speed':1.0}),json.dumps(used),label,'queued'))
+        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps({'total_steps':12,'speed':1.0}),json.dumps(used),label,'queued',int(preview)))
         return {'id':jid},202
+
+@app.get('/api/previews/<jid>')
+@protected
+def preview_status(jid):
+    with db() as c:
+        row = c.execute('SELECT id,status,error FROM jobs WHERE id=? AND is_preview=1', (jid,)).fetchone()
+    if not row: abort(404)
+    return dict(row)
+
+def cleanup_previews():
+    # Never remove a running task or a task still waiting for the worker.
+    with db() as c:
+        rows = c.execute("SELECT id,audio FROM jobs WHERE is_preview=1 AND status IN ('done','failed') AND created_at < datetime('now','-1 hour')").fetchall()
+        for row in rows:
+            if row['audio']: (AUDIO / row['audio']).unlink(missing_ok=True)
+            c.execute('DELETE FROM jobs WHERE id=?', (row['id'],))
 
 @app.route('/api/jobs/<jid>', methods=['PATCH','DELETE'])
 @protected
@@ -273,6 +303,7 @@ def audio(jid):
 def worker():
     while True:
         try:
+            cleanup_previews()
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
                 row=c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()

@@ -18,6 +18,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv('PIPER_MODELS_DIR', str(models))
     import app.server
     module = importlib.reload(app.server)
+    class Styles:
+        def raise_for_status(self): pass
+        def json(self): return {'styles': [{'name': x} for x in module.VOICES['supertonic']]}
+    monkeypatch.setattr(module.requests, 'get', lambda *a, **kw: Styles())
     module.app.config['TESTING'] = True
     return module, module.app.test_client()
 
@@ -97,3 +101,24 @@ def test_import_preview_and_regional_language(client):
     assert c.post('/api/rules/import',json={'rows':preview.json},headers=h).json['imported']==0
     assert any(r['language']=='fr-FR' and r['status']=='proposal' for r in c.get('/api/rules').json)
     assert c.post('/api/jobs',json={'engine':'supertonic','voice':'M1','source':'bible','language':'fr-FR','text':'Nom'},headers=h).status_code==202
+
+
+def test_preview_hidden_and_cleanup(client):
+    m,c=client; h=login(c)
+    r=c.post('/api/rules',json={'language':'nl','source':'bofm','original':'Test','replacement':'Testje'},headers=h)
+    rid=r.json['id']
+    before=c.get(f'/api/rules/{rid}/history').json
+    result=c.post('/api/previews',json={'engine':'supertonic','voice':'M1','source':'bofm','text':'Test','test_rule':rid},headers=h)
+    assert result.status_code==202
+    jid=result.json['id']
+    assert c.get('/api/jobs').json == []
+    assert c.get('/api/previews/'+jid).json['status']=='queued'
+    assert c.get(f'/api/rules/{rid}/history').json == before
+    with m.db() as db:
+        db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
+    m.init()
+    assert c.get('/api/previews/'+jid).json['status']=='failed'
+    with m.db() as db:
+        db.execute("UPDATE jobs SET created_at=datetime('now','-2 hours') WHERE id=?",(jid,))
+    m.cleanup_previews()
+    assert c.get('/api/previews/'+jid).status_code==404

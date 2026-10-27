@@ -25,16 +25,6 @@ services:
       - /volume1/docker/versado-audio-worker/models:/data
     mem_limit: ${PIPER_MEMORY:-2g}
     networks: [internal]
-  piper-test:
-    image: ghcr.io/rjgout/versado-audio-worker:${IMAGE_TAG:-latest}
-    restart: unless-stopped
-    command: ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:5006", "--timeout", "1800", "app.bridge:app"]
-    environment:
-      PIPER_HOST: piper
-    mem_limit: ${BRIDGE_MEMORY:-256m}
-    healthcheck:
-      disable: true
-    networks: [internal]
   supertonic:
     image: k8bit/supertonic:latest
     restart: unless-stopped
