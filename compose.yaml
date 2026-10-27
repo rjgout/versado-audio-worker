@@ -1,0 +1,48 @@
+name: versado-audio-worker
+services:
+  voice-lab:
+    image: ghcr.io/rjgout/versado-audio-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:5006:5006"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY vereist}
+      PASSWORD_HASH: ${PASSWORD_HASH:?PASSWORD_HASH vereist}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PIPER_HOST: piper
+      SUPERTONIC_URL: http://supertonic:8000
+    volumes:
+      - /volume1/docker/versado-audio-worker/tests:/data/tests
+      - /volume1/docker/versado-audio-worker/pronunciation:/data/pronunciation
+    mem_limit: ${APP_MEMORY:-512m}
+    networks: [internal]
+  piper:
+    image: rhasspy/wyoming-piper:2.5.2
+    restart: unless-stopped
+    command: ["--voice", "nl_NL-ronnie-medium", "--data-dir", "/data", "--download-dir", "/data", "--uri", "tcp://0.0.0.0:10200"]
+    volumes:
+      - /volume1/docker/versado-audio-worker/models:/data
+    mem_limit: ${PIPER_MEMORY:-2g}
+    networks: [internal]
+  piper-test:
+    image: ghcr.io/rjgout/versado-audio-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:5006", "--timeout", "1800", "app.bridge:app"]
+    environment:
+      PIPER_HOST: piper
+    mem_limit: ${BRIDGE_MEMORY:-256m}
+    healthcheck:
+      disable: true
+    networks: [internal]
+  supertonic:
+    image: k8bit/supertonic:latest
+    restart: unless-stopped
+    volumes:
+      - /volume1/docker/versado-audio-worker/supertonic-models:/models
+    environment:
+      SUPERTONIC_MODEL: supertonic-3
+    mem_limit: ${SUPERTONIC_MEMORY:-4g}
+    networks: [internal]
+networks:
+  internal:
+    driver: bridge
