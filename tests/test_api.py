@@ -74,7 +74,7 @@ def test_supertonic_request(monkeypatch):
     def post(url,**kwargs): seen.update(url=url,**kwargs); return Response()
     monkeypatch.setattr(engines.requests,'post',post)
     assert engines.synthesize('supertonic','F1','Hallo') == b'WAV'
-    assert seen['json']=={'text':'Hallo','voice':'F1','lang':'nl','total_steps':12,'speed':1.0}
+    assert seen['json']=={'text':'Hallo','voice':'F1','lang':'nl','steps':12,'speed':1.0}
     with pytest.raises(ValueError): engines.synthesize('supertonic','wrong','Hallo')
 
 def test_piper_protocol(monkeypatch):
@@ -122,3 +122,17 @@ def test_preview_hidden_and_cleanup(client):
         db.execute("UPDATE jobs SET created_at=datetime('now','-2 hours') WHERE id=?",(jid,))
     m.cleanup_previews()
     assert c.get('/api/previews/'+jid).status_code==404
+
+
+def test_supertonic_job_settings_and_existing_metadata(client):
+    import json
+    m, c = client
+    h = login(c)
+    payload = {'engine': 'supertonic', 'voice': 'M5', 'source': 'bofm', 'text': 'Nephi spreekt.'}
+    first = c.post('/api/jobs', json=payload, headers=h).json['id']
+    with m.db() as db:
+        db.execute('UPDATE jobs SET settings=? WHERE id=?', (json.dumps({'total_steps': 12, 'speed': 1.0}), first))
+    second = c.post('/api/jobs', json=payload, headers=h).json['id']
+    jobs = {job['id']: job for job in c.get('/api/jobs').json}
+    assert json.loads(jobs[first]['settings']) == {'total_steps': 12, 'speed': 1.0}
+    assert json.loads(jobs[second]['settings']) == {'steps': 12, 'speed': 1.0}
