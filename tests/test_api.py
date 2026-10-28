@@ -320,3 +320,53 @@ def test_repeated_analysis_history_and_unavailable_service(client, monkeypatch):
     assert len(history)==2 and history[0]['id']==second and history[0]['status']=='interrupted'
     assert history[1]['id']==first and history[1]['report']=='{}'
     assert (m.AUDIO/'old.wav').read_bytes()==original
+
+
+def test_uncertain_tts_blocks_both_queues_until_explicit_recovery(client, monkeypatch):
+    m,c=client; h=login(c)
+    data={'engine':'supertonic','voice':'M1','source':'bofm','text':'eerste'}
+    first=c.post('/api/jobs',json=data,headers=h).json['id']
+    second=c.post('/api/jobs',json={**data,'text':'tweede'},headers=h).json['id']
+    with m.db() as db:
+        db.execute("INSERT INTO quality_tasks(id,job_id,model,status) VALUES('quality',?,'base','queued')",(first,))
+    calls=[]
+    def lost(*args): calls.append(args); raise m.requests.ConnectionError('verbinding weg')
+    monkeypatch.setattr(m,'synthesize',lost)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    assert len(calls)==1
+    assert c.get('/api/worker/status').json['blocked'] is True
+    m.init()
+    with pytest.raises(SystemExit): m.worker()
+    with m.db() as db:
+        assert db.execute('SELECT status FROM jobs WHERE id=?',(second,)).fetchone()[0]=='queued'
+        assert db.execute("SELECT status FROM quality_tasks WHERE id='quality'").fetchone()[0]=='queued'
+    assert c.post('/api/worker/recover',json={'job_id':first,'confirmed_engine_stopped':True}).status_code==403
+    assert c.post('/api/worker/recover',json={'job_id':first,'confirmed_engine_stopped':False},headers=h).status_code==400
+    assert c.post('/api/worker/recover',json={'job_id':'wrong','confirmed_engine_stopped':True},headers=h).status_code==409
+    assert c.post('/api/worker/recover',json={'job_id':first,'confirmed_engine_stopped':True},headers=h).status_code==200
+    assert not c.get('/api/worker/status').json['blocked']
+
+
+def test_running_tts_guard_cannot_be_manually_cleared(client):
+    m,c=client; h=login(c)
+    data={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'tekst'}
+    jid=c.post('/api/jobs',json=data,headers=h).json['id']
+    with m.db() as db:
+        db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
+        db.execute('INSERT INTO heavy_tts_guard(singleton,job_id,engine) VALUES(1,?,?)',(jid,'piper'))
+    assert c.post('/api/worker/recover',json={'job_id':jid,'confirmed_engine_stopped':True},headers=h).status_code==409
+
+
+def test_guard_migration_blocks_legacy_running_job(client):
+    m,c=client; h=login(c)
+    jid=c.post('/api/jobs',json={'engine':'supertonic','voice':'M1','source':'bofm','text':'test'},headers=h).json['id']
+    with m.db() as db:
+        db.execute('DROP TABLE heavy_tts_guard')
+        db.execute('UPDATE schema_version SET version=3')
+        db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
+    m.init()
+    with m.db() as db:
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==4
+    state=c.get('/api/worker/status').json
+    assert state['blocked'] and state['job_id']==jid

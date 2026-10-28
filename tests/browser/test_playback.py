@@ -27,6 +27,7 @@ def test_playback_survives_polling():
     audio = wav.getvalue()
     state = {'jobs': [dict(id='one', label='Eerste', engine='piper', voice='ronnie', created_at='nu', status='done', error='', original='Hallo', spoken='Hallo', settings='{}', rules='[]'), dict(id='two', label='Volgende', engine='piper', voice='ronnie', created_at='nu', status='queued', error='', original='Test', spoken='Test', settings='{}', rules='[]')]}
     sent = {}
+    worker = {'blocked': False}
     rules = [dict(id=1, language='nl', source='bofm', original='Nephi', replacement='Nefi', status='proposal', version=1, note='', engine=None, voice=None)]
     try:
         with sync_playwright() as p:
@@ -36,6 +37,9 @@ def test_playback_survives_polling():
             def routes(route):
                 path = route.request.url.split('?')[0]
                 if path.endswith('/api/session'): result = {'authenticated': True, 'csrf': 'test'}
+                elif path.endswith('/api/worker/status'): result = worker
+                elif path.endswith('/api/worker/recover'):
+                    sent['recovery'] = route.request.post_data_json; worker['blocked'] = False; result = {'ok':True}
                 elif path.endswith('/api/voices'): result = {'piper': ['ronnie'], 'supertonic': ['M5']}
                 elif path.endswith('/api/jobs') and route.request.method == 'POST':
                     sent['job'] = route.request.post_data_json; result = {'id':'new'}
@@ -79,6 +83,13 @@ def test_playback_survives_polling():
             }''')
             assert card.locator('h3').inner_text() == 'Eerste'
             assert page.locator('[data-job-id="two"]').count() == 1
+            worker.update(blocked=True,engine='supertonic',job_id='broken')
+            page.wait_for_selector('#worker-blocked:not([hidden])',timeout=10000)
+            assert player.evaluate('(a) => a === window.originalAudio && !a.paused')
+            page.on('dialog',lambda dialog: dialog.accept())
+            page.locator('#worker-recover').click()
+            page.wait_for_selector('#worker-blocked[hidden]',state='attached',timeout=10000)
+            assert sent['recovery']=={'job_id':'broken','confirmed_engine_stopped':True}
             player.evaluate('(a) => a.pause()')
             paused = player.evaluate('(a) => a.currentTime')
             page.wait_for_timeout(4500)

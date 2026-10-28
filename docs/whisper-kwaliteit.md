@@ -4,7 +4,7 @@ Deze draft ondersteunt een optionele lokale controle van nieuwe én bestaande op
 
 ## Status en beperkingen
 
-De implementatie moet nog op de Synology en met echte Nederlandse M5-opnamen worden gecontroleerd. Het meertalige tiny-model en een Engelstalig upstream-fragment zijn lokaal met de echte binary getest; dat is geen Nederlandse kwaliteitsmeting en bewijst geen J4125-compatibiliteit. Detectie van afzonderlijke lettergreepstotteringen, lange stiltes, afgebroken begin en einde, en betrouwbare duurafwijkingen is niet compleet. Een lopende analyse kan worden gestopt; bij herstart wordt een actieve taak als onderbroken geregistreerd en wordt de service verzocht deze te beëindigen. Een gedeeld bestandslot beschermt het zware werk, maar controleer dit met echte engines op de NAS. Automatische hergeneratie en fragmentversies zijn bewust niet onderdeel van deze fase.
+De implementatie moet nog op de Synology en met echte Nederlandse M5-opnamen worden gecontroleerd. Het meertalige tiny-model en een Engelstalig upstream-fragment zijn lokaal met de echte binary getest; dat is geen Nederlandse kwaliteitsmeting en bewijst geen J4125-compatibiliteit. Detectie van afzonderlijke lettergreepstotteringen, lange stiltes, afgebroken begin en einde, en betrouwbare duurafwijkingen is niet compleet. Een lopende analyse kan worden gestopt; bij herstart wordt een actieve taak als onderbroken geregistreerd en wordt de service verzocht deze te beëindigen. Een persistent wachtrijslot en een gedeeld bestandslot beschermen het zware werk; controleer dit met echte engines op de NAS. Automatische hergeneratie en fragmentversies zijn bewust niet onderdeel van deze fase.
 
 ## Images en Portainer
 
@@ -17,7 +17,7 @@ Na een gecontroleerde merge naar main bouwt CI de app en de aparte `ghcr.io/rjgo
 5. Update de bestaande stack handmatig met de private registry. Start de service en controleer logs en de knop **Controleer beschikbaarheid** in Voice Lab. Deze toont afzonderlijk servicebereikbaarheid, binary, model, checksum en gereedheid. De gewone generatie werkt ook zonder een beschikbare Whisper-service, mits de controle uit staat.
 6. Bij een bestaande voltooide opname: kies een model, selecteer **Controleer audiokwaliteit** en open **Kwaliteitsrapporten**. Bestaande WAV-bestanden worden niet gewijzigd. Rapporten blijven in de database. Een lopende of wachtende controle kan worden gestopt via de opnamegegevens; controleer dat de status verandert en de originele audio afspeelbaar blijft.
 
-De app en Whisper mounten dezelfde `pronunciation`-map voor het werklot. Geef UID/GID 10001 lees- en schrijfrechten op die map en op `tests`; geef UID 10001 lees- en traverseerrechten op de modelmap. Gebruik niet meerdere app-instanties. `WHISPER_THREADS` is begrensd op 1–4. De app-worker en service gebruiken dezelfde lock; afhankelijk van de concrete engine kan deze na een app-crash nog werk afmaken. Test dat scenario voordat dit dagelijks wordt gebruikt.
+De app en Whisper mounten dezelfde `pronunciation`-map voor het werklot. Geef UID/GID 10001 lees- en schrijfrechten op die map en op `tests`; geef UID 10001 lees- en traverseerrechten op de modelmap. Gebruik niet meerdere app-instanties. `WHISPER_THREADS` is begrensd op 1–4. De app bewaart vóór elke TTS-aanroep in SQLite een slot met taak-ID en engine. Alleen een volledig antwoord van de engine verwijdert het automatisch. Na een crash, onderbroken verbinding of andere onzekere fout blijft het slot staan en start geen nieuwe TTS- of Whisper-taak. Test dit scenario met de echte engines voordat dit dagelijks wordt gebruikt.
 
 ## Base-model installeren
 
@@ -35,6 +35,10 @@ printf '%s  %s\n' '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2
 Controleer de uitvoer van `sha256sum -c` voordat u `mv` uitvoert; voer na een fout de laatste regel niet uit. Zorg dat UID 10001 de map kan doorlopen en het model lezen. Herstart Whisper indien nodig en controleer de beschikbaarheid in de app.
 
 Overige meertalige modellen van dezelfde bron: `ggml-tiny.bin`, SHA-256 `be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21`; `ggml-small.bin`, SHA-256 `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`. Gebruik geen `.en`-modellen. De service controleert voor iedere analyse de checksum; er is geen download bij containerstart.
+
+## Herstel na onzekere generatie
+
+Een TTS-engine kan na een crash van de app of een netwerkonderbreking nog zelfstandig werken. Daarom laat de app het slot staan; er wordt geen tijdslimiet gebruikt om te gokken dat de engine klaar is. De banner **Wachtrij veilig gepauzeerd** noemt de betrokken engine. Open Portainer, stop die enginecontainer volledig en controleer dat de oude container echt is gestopt; start hem daarna opnieuw en wacht totdat hij klaar is. Bevestig pas dan in de app via **Engine is herstart; hervat wachtrij**. De bevestiging is bewust een handeling van de beheerder, niet een automatische aanname. Het onderbroken verzoek is mislukt en wordt niet automatisch opnieuw gegenereerd. Als niet vaststaat dat de oude engine is gestopt, laat de wachtrij geblokkeerd. Onderbroken Whisper-aanvragen worden apart geannuleerd en het gedeelde bestandslot blijft in bezit van de Whisper-service zolang die werkt.
 
 ## Back-up, update en terugrollen
 

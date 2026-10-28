@@ -58,6 +58,12 @@ def init():
             model TEXT NOT NULL, status TEXT NOT NULL, report TEXT, error TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
         c.execute('UPDATE schema_version SET version=3 WHERE version < 3')
+        c.execute('''CREATE TABLE IF NOT EXISTS heavy_tts_guard (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1), job_id TEXT NOT NULL,
+            engine TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+        # An older app may have crashed while using a schema without a guard.
+        c.execute("INSERT OR IGNORE INTO heavy_tts_guard(singleton,job_id,engine) SELECT 1,id,engine FROM jobs WHERE status='running' ORDER BY rowid LIMIT 1")
+        c.execute('UPDATE schema_version SET version=4 WHERE version < 4')
         c.execute("UPDATE quality_tasks SET status='interrupted',error='Controle onderbroken; beëindiging wordt bevestigd.' WHERE status='running'")
         if not c.execute('SELECT 1 FROM rules WHERE id=1').fetchone():
             c.execute("INSERT INTO rules(id,language,source,original,replacement,status,version) VALUES(1,'nl','bofm','Nephi','Nefi','approved',1)")
@@ -244,6 +250,27 @@ def rule_history(rid):
     with db() as c:
         return jsonify([dict(x) for x in c.execute('SELECT version,snapshot,changed_at FROM rule_history WHERE rule_id=? ORDER BY version DESC',(rid,))])
 
+@app.get('/api/worker/status')
+@protected
+def worker_status():
+    with db() as c:
+        row=c.execute("SELECT g.job_id,g.engine,g.started_at,j.status FROM heavy_tts_guard g LEFT JOIN jobs j ON j.id=g.job_id WHERE g.singleton=1").fetchone()
+    if row is None: return {'blocked':False}
+    return {'blocked':row['status'] != 'running', 'job_id':row['job_id'], 'engine':row['engine'], 'started_at':row['started_at']}
+
+@app.post('/api/worker/recover')
+@protected
+def recover_worker():
+    p=payload()
+    if p.get('confirmed_engine_stopped') is not True or not isinstance(p.get('job_id'), str): abort(400, 'Bevestig dat de betrokken engine volledig is gestopt')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute("SELECT g.job_id,j.status FROM heavy_tts_guard g LEFT JOIN jobs j ON j.id=g.job_id WHERE g.singleton=1").fetchone()
+        if not row or row['job_id'] != p['job_id']: abort(409, 'De blokkering is gewijzigd; ververs de pagina')
+        if row['status']=='running': abort(409, 'Een opdracht is nog actief')
+        c.execute('DELETE FROM heavy_tts_guard WHERE singleton=1 AND job_id=?',(row['job_id'],))
+    return {'ok':True}
+
 @app.route('/api/previews', methods=['POST'])
 @app.route('/api/jobs', methods=['GET','POST'])
 @protected
@@ -412,12 +439,17 @@ def worker():
                     except requests.RequestException: break
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
-                row=c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
-                if row: c.execute("UPDATE jobs SET status='running' WHERE id=?",(row['id'],))
-                task=None
-                if not row:
-                    task=c.execute("SELECT * FROM quality_tasks WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
-                    if task: c.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(task['id'],))
+                # A persisted guard survives client death even when the engine does not.
+                guarded=c.execute('SELECT 1 FROM heavy_tts_guard WHERE singleton=1').fetchone()
+                row=None; task=None
+                if not guarded:
+                    row=c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
+                    if row:
+                        c.execute("UPDATE jobs SET status='running' WHERE id=?",(row['id'],))
+                        c.execute('INSERT INTO heavy_tts_guard(singleton,job_id,engine) VALUES(1,?,?)',(row['id'],row['engine']))
+                    else:
+                        task=c.execute("SELECT * FROM quality_tasks WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
+                        if task: c.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(task['id'],))
             if task:
                 try:
                     report=run_quality(task)
@@ -434,6 +466,9 @@ def worker():
                 with (DATA/'heavy-work.lock').open('a') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                     audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'],stored_settings(row['engine'], json.loads(row['settings'])))
+                    # A complete engine response proves the request ended. Release
+                    # only our guard, and keep flock until the DB transaction commits.
+                    with db() as c: c.execute('DELETE FROM heavy_tts_guard WHERE singleton=1 AND job_id=?',(row['id'],))
                 if len(audio_bytes)>100*1024*1024: raise ValueError('Audio is te groot')
                 import io
                 with wave.open(io.BytesIO(audio_bytes),'rb') as w:

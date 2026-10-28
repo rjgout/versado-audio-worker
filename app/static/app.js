@@ -109,6 +109,17 @@ async function showReports(card,id){
     }
   }catch(e){msg(e)}
 }
+let blockedWorker=null;
+function showWorkerStatus(status){
+  blockedWorker=status.blocked?status:null;
+  $('#worker-blocked').hidden=!blockedWorker;
+  if(blockedWorker)$('#worker-blocked-text').textContent='De vorige '+status.engine+'-generatie is onderbroken of de verbinding is verbroken. De engine kan nog bezig zijn.';
+}
+$('#worker-recover').onclick=async()=>{
+  if(!blockedWorker)return;
+  if(!confirm('Heb je de betrokken enginecontainer volledig gestopt en opnieuw gestart, en gecontroleerd dat hij gereed is?'))return;
+  try{await api('/api/worker/recover',{method:'POST',body:JSON.stringify({job_id:blockedWorker.job_id,confirmed_engine_stopped:true})});msg('Wachtrij hervat.');refresh()}catch(e){msg(e)}
+};
 let refreshRunning=false, refreshPending=false, refreshVersion=0;
 async function refresh(poll=false){
   if($('#workspace').hidden||(poll&&refreshRunning))return;
@@ -119,9 +130,9 @@ async function refresh(poll=false){
     while(refreshPending){
       refreshPending=false;const version=refreshVersion;
       try{
-        const [jobs,rules]=await Promise.all([api('/api/jobs'),api('/api/rules')]);
+        const [jobs,rules,status]=await Promise.all([api('/api/jobs'),api('/api/rules'),api('/api/worker/status')]);
         if(version!==refreshVersion)continue;
-        updateJobs(jobs);allRules=rules;renderRules();
+        updateJobs(jobs);allRules=rules;renderRules();showWorkerStatus(status);
       }catch(e){if(version===refreshVersion)msg(e)}
     }
   }finally{refreshRunning=false}
