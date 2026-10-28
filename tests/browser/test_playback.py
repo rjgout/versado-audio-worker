@@ -27,6 +27,7 @@ def test_playback_survives_polling():
     audio = wav.getvalue()
     state = {'jobs': [dict(id='one', label='Eerste', engine='piper', voice='ronnie', created_at='nu', status='done', error='', original='Hallo', spoken='Hallo', settings='{}', rules='[]'), dict(id='two', label='Volgende', engine='piper', voice='ronnie', created_at='nu', status='queued', error='', original='Test', spoken='Test', settings='{}', rules='[]')]}
     sent = {}
+    worker = {'blocked': False}
     rules = [dict(id=1, language='nl', source='bofm', original='Nephi', replacement='Nefi', status='proposal', version=1, note='', engine=None, voice=None)]
     try:
         with sync_playwright() as p:
@@ -36,10 +37,15 @@ def test_playback_survives_polling():
             def routes(route):
                 path = route.request.url.split('?')[0]
                 if path.endswith('/api/session'): result = {'authenticated': True, 'csrf': 'test'}
+                elif path.endswith('/api/worker/status'): result = worker
+                elif path.endswith('/api/worker/recover'):
+                    sent['recovery'] = route.request.post_data_json; worker['blocked'] = False; result = {'ok':True}
                 elif path.endswith('/api/voices'): result = {'piper': ['ronnie'], 'supertonic': ['M5']}
                 elif path.endswith('/api/jobs') and route.request.method == 'POST':
                     sent['job'] = route.request.post_data_json; result = {'id':'new'}
                 elif path.endswith('/api/jobs'): result = state['jobs']
+                elif path.endswith('/api/jobs/one/quality') and route.request.method == 'POST': sent['quality']=route.request.post_data_json; result={'id':'q'}
+                elif path.endswith('/api/jobs/one/quality'): result=[{'model':'base','status':'done','created_at':'nu','report':json.dumps({'expected':'Hallo','transcript':'Hallo hallo','findings':[{'type':'possible_repetition','expected':[],'heard':['hallo'],'time_range':{'start_ms':1000,'end_ms':2000}}]})}]
                 elif path.endswith('/api/rules'): result = rules
                 elif path.endswith('/api/previews') and route.request.method == 'POST':
                     sent['preview'] = route.request.post_data_json; result = {'id': 'preview'}
@@ -77,6 +83,13 @@ def test_playback_survives_polling():
             }''')
             assert card.locator('h3').inner_text() == 'Eerste'
             assert page.locator('[data-job-id="two"]').count() == 1
+            worker.update(blocked=True,engine='supertonic',job_id='broken')
+            page.wait_for_selector('#worker-blocked:not([hidden])',timeout=10000)
+            assert player.evaluate('(a) => a === window.originalAudio && !a.paused')
+            page.on('dialog',lambda dialog: dialog.accept())
+            page.locator('#worker-recover').click()
+            page.wait_for_selector('#worker-blocked[hidden]',state='attached',timeout=10000)
+            assert sent['recovery']=={'job_id':'broken','confirmed_engine_stopped':True}
             player.evaluate('(a) => a.pause()')
             paused = player.evaluate('(a) => a.currentTime')
             page.wait_for_timeout(4500)
@@ -84,6 +97,15 @@ def test_playback_survives_polling():
             assert abs(player.evaluate('(a) => a.currentTime') - paused) < .3
             player.evaluate('(a) => { a.currentTime = 4; a.play() }')
             page.wait_for_function('document.querySelector("[data-job-id=one] audio").currentTime > 5')
+            card.locator('.quality-model').select_option('base')
+            card.locator('.quality-start').click()
+            page.wait_for_timeout(200)
+            assert sent['quality']=={'model':'base'}
+            card.locator('.quality-history').click()
+            card.locator('.quality-reports li').first.wait_for()
+            assert 'Mogelijke herhaling' in card.locator('.quality-reports').inner_text()
+            card.locator('.quality-reports button').click()
+            assert player.evaluate('(a) => a === window.originalAudio && Math.abs(a.currentTime-1) < 1')
             page.locator('[data-tab="dictionary"]').click()
             page.locator('[data-rule-id="1"] .play').click()
             preview = page.locator('[data-rule-id="1"] audio')

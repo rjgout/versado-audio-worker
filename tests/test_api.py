@@ -200,3 +200,173 @@ def test_supertonic_custom_wire_parameters(monkeypatch):
     options={'steps':15,'speed':0.85,'silence_duration':0.45}
     assert engines.synthesize('supertonic','M5','Hallo','nl-NL',options)==b'WAV'
     assert seen['json']=={'text':'Hallo','voice':'M5','lang':'nl',**options}
+
+
+def test_quality_queue_report_and_recovery(client, monkeypatch):
+    import json
+    m,c=client; h=login(c)
+    request={'engine':'supertonic','voice':'M5','source':'bofm','text':'Nephi ging verder'}
+    jid=c.post('/api/jobs',json=request,headers=h).json['id']
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b'\0\0'*16000)
+    (m.AUDIO/(jid+'.wav')).write_bytes(buf.getvalue())
+    with m.db() as db:
+        db.execute("UPDATE jobs SET status='done',audio=? WHERE id=?",(jid+'.wav',jid))
+    resp=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h)
+    assert resp.status_code==202
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {'text':'Nefi ging ging verder','model':'base'}
+    def post(url,**kw):
+        assert kw['params']['model']=='base' and kw['params']['language']=='nl' and kw['params']['task']==resp.json['id']
+        return Response()
+    monkeypatch.setattr(m.requests,'post',post)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    task=c.get('/api/jobs/'+jid+'/quality').json[0]
+    report=json.loads(task['report'])
+    assert task['status']=='done' and report['status']=='manual_review'
+    assert any(x['type']=='possible_repetition' for x in report['findings'])
+    assert report['audio']['near_silence']
+    assert (m.AUDIO/(jid+'.wav')).exists()
+    qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'tiny'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(qid,))
+    m.init()
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='interrupted'
+
+
+def test_quality_authorization_and_missing_engine(client, monkeypatch):
+    m,c=client; h=login(c)
+    assert m.app.test_client().get('/api/jobs/not-real/quality').status_code==401
+    jid=c.post('/api/jobs',json={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'test'},headers=h).json['id']
+    assert c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).status_code==409
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',audio='missing.wav' WHERE id=?",(jid,))
+    assert c.post('/api/jobs/'+jid+'/quality',json={'model':'base.en'},headers=h).status_code==400
+    qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
+    assert c.post('/api/quality/'+qid+'/cancel',headers=h).status_code==200
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='cancelled'
+
+
+def test_generation_waits_for_shared_whisper_lock(client, monkeypatch):
+    import fcntl
+    import threading
+    m,c=client; h=login(c)
+    payload={'engine':'supertonic','voice':'M1','source':'bofm','text':'test'}
+    assert c.post('/api/jobs',json=payload,headers=h).status_code==202
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0')
+    called=threading.Event()
+    def generate(*args): called.set(); return buf.getvalue()
+    monkeypatch.setattr(m,'synthesize',generate)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    def worker():
+        try: m.worker()
+        except SystemExit: pass
+    with (m.DATA/'heavy-work.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        thread=threading.Thread(target=worker,daemon=True); thread.start()
+        assert not called.wait(0.5)
+        fcntl.flock(lock,fcntl.LOCK_UN)
+        assert called.wait(5)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_running_cancel_and_interrupted_recovery(client, monkeypatch):
+    m,c=client; h=login(c)
+    jid=c.post('/api/jobs',json={'engine':'supertonic','voice':'M1','source':'bible','text':'tekst'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',audio='safe.wav' WHERE id=?",(jid,))
+    (m.AUDIO/'safe.wav').write_bytes(b'existing')
+    qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(qid,))
+    calls=[]
+    class Response:
+        def raise_for_status(self): pass
+    def post(url,**kwargs): calls.append((url,kwargs)); return Response()
+    monkeypatch.setattr(m.requests,'post',post)
+    assert c.post('/api/quality/'+qid+'/cancel',headers=h).status_code==200
+    assert calls[0][1]['params']=={'task':qid}
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='cancelled'
+    assert (m.AUDIO/'safe.wav').read_bytes()==b'existing'
+    next_id=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(next_id,))
+    m.init()
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='interrupted'
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    assert calls[-1][1]['params']=={'task':next_id}
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='failed'
+    assert (m.AUDIO/'safe.wav').read_bytes()==b'existing'
+
+
+def test_repeated_analysis_history_and_unavailable_service(client, monkeypatch):
+    m,c=client; h=login(c)
+    jid=c.post('/api/jobs',json={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bible','text':'tekst'},headers=h).json['id']
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b'\0\0'*100)
+    original=buf.getvalue();(m.AUDIO/'old.wav').write_bytes(original)
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',audio='old.wav' WHERE id=?",(jid,))
+    first=c.post('/api/jobs/'+jid+'/quality',json={'model':'tiny'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='done',report='{}' WHERE id=?",(first,))
+    second=c.post('/api/jobs/'+jid+'/quality',json={'model':'small'},headers=h).json['id']
+    def offline(*a,**kw): raise m.requests.ConnectionError('offline')
+    monkeypatch.setattr(m.requests,'post',offline)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    history=c.get('/api/jobs/'+jid+'/quality').json
+    assert len(history)==2 and history[0]['id']==second and history[0]['status']=='interrupted'
+    assert history[1]['id']==first and history[1]['report']=='{}'
+    assert (m.AUDIO/'old.wav').read_bytes()==original
+
+
+def test_uncertain_tts_blocks_both_queues_until_explicit_recovery(client, monkeypatch):
+    m,c=client; h=login(c)
+    data={'engine':'supertonic','voice':'M1','source':'bofm','text':'eerste'}
+    first=c.post('/api/jobs',json=data,headers=h).json['id']
+    second=c.post('/api/jobs',json={**data,'text':'tweede'},headers=h).json['id']
+    with m.db() as db:
+        db.execute("INSERT INTO quality_tasks(id,job_id,model,status) VALUES('quality',?,'base','queued')",(first,))
+    calls=[]
+    def lost(*args): calls.append(args); raise m.requests.ConnectionError('verbinding weg')
+    monkeypatch.setattr(m,'synthesize',lost)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    assert len(calls)==1
+    assert c.get('/api/worker/status').json['blocked'] is True
+    m.init()
+    with pytest.raises(SystemExit): m.worker()
+    with m.db() as db:
+        assert db.execute('SELECT status FROM jobs WHERE id=?',(second,)).fetchone()[0]=='queued'
+        assert db.execute("SELECT status FROM quality_tasks WHERE id='quality'").fetchone()[0]=='queued'
+    assert c.post('/api/worker/recover',json={'job_id':first,'confirmed_engine_stopped':True}).status_code==403
+    assert c.post('/api/worker/recover',json={'job_id':first,'confirmed_engine_stopped':False},headers=h).status_code==400
+    assert c.post('/api/worker/recover',json={'job_id':'wrong','confirmed_engine_stopped':True},headers=h).status_code==409
+    assert c.post('/api/worker/recover',json={'job_id':first,'confirmed_engine_stopped':True},headers=h).status_code==200
+    assert not c.get('/api/worker/status').json['blocked']
+
+
+def test_running_tts_guard_cannot_be_manually_cleared(client):
+    m,c=client; h=login(c)
+    data={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'tekst'}
+    jid=c.post('/api/jobs',json=data,headers=h).json['id']
+    with m.db() as db:
+        db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
+        db.execute('INSERT INTO heavy_tts_guard(singleton,job_id,engine) VALUES(1,?,?)',(jid,'piper'))
+    assert c.post('/api/worker/recover',json={'job_id':jid,'confirmed_engine_stopped':True},headers=h).status_code==409
+
+
+def test_guard_migration_blocks_legacy_running_job(client):
+    m,c=client; h=login(c)
+    jid=c.post('/api/jobs',json={'engine':'supertonic','voice':'M1','source':'bofm','text':'test'},headers=h).json['id']
+    with m.db() as db:
+        db.execute('DROP TABLE heavy_tts_guard')
+        db.execute('UPDATE schema_version SET version=3')
+        db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
+    m.init()
+    with m.db() as db:
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==4
+    state=c.get('/api/worker/status').json
+    assert state['blocked'] and state['job_id']==jid

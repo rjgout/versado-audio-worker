@@ -13,6 +13,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -23,6 +25,20 @@ jobs:
       - run: pip install playwright==1.55.0
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest tests/browser -q
+      - name: Determine image build scope
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT_NAME" = push ]; then
+            echo "app=true" >> "$GITHUB_OUTPUT"
+            echo "whisper=true" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only "refs/remotes/origin/$BASE_REF"...HEAD > /tmp/versado-ci-paths
+            if grep -Eq '^(app/|tests/|scripts/smoke.py|Dockerfile|requirements.txt|compose.yaml|.github/workflows/ci.yml)' /tmp/versado-ci-paths; then echo "app=true" >> "$GITHUB_OUTPUT"; else echo "app=false" >> "$GITHUB_OUTPUT"; fi
+            if grep -Eq '^(whisper/|app/server.py|app/quality.py|tests/test_whisper_service.py|tests/test_quality.py|scripts/smoke_whisper.py|compose.yaml|.github/workflows/ci.yml)' /tmp/versado-ci-paths; then echo "whisper=true" >> "$GITHUB_OUTPUT"; else echo "whisper=false" >> "$GITHUB_OUTPUT"; fi
+          fi
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         if: github.event_name == 'push'
@@ -31,15 +47,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
+        if: steps.changes.outputs.app == 'true'
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
-          load: ${{ github.event_name == 'pull_request' }}
+          push: false
+          load: true
           tags: |
             ghcr.io/rjgout/versado-audio-worker:latest
             ghcr.io/rjgout/versado-audio-worker:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Container smoke test (no TTS engines)
-        if: github.event_name == 'pull_request'
+        if: steps.changes.outputs.app == 'true'
         run: python scripts/smoke.py
+      - name: Build Whisper CPU image
+        if: steps.changes.outputs.whisper == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: whisper/Dockerfile
+          load: true
+          tags: versado-whisper:ci
+          cache-from: type=gha,scope=whisper
+          cache-to: type=gha,mode=max,scope=whisper
+      - name: Whisper service smoke test (no model download)
+        if: steps.changes.outputs.whisper == 'true'
+        run: python scripts/smoke_whisper.py
+      - name: Publish tested images on main
+        if: github.event_name == 'push'
+        run: |
+          docker push ghcr.io/rjgout/versado-audio-worker:latest
+          docker push ghcr.io/rjgout/versado-audio-worker:sha-${{ github.sha }}
+          docker tag versado-whisper:ci ghcr.io/rjgout/versado-audio-worker-whisper:latest
+          docker tag versado-whisper:ci ghcr.io/rjgout/versado-audio-worker-whisper:sha-${{ github.sha }}
+          docker push ghcr.io/rjgout/versado-audio-worker-whisper:latest
+          docker push ghcr.io/rjgout/versado-audio-worker-whisper:sha-${{ github.sha }}
