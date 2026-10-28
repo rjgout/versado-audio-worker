@@ -1,5 +1,6 @@
 """Private, single-request whisper.cpp CLI service. Never downloads models."""
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -62,7 +63,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 data=self.rfile.read(length)
                 if len(data)!=length: raise ValueError('Onvolledige audio')
-                result=transcribe(data,model,language)
+                with (Path(os.getenv('WHISPER_LOCK_DIR','/coord'))/'heavy-work.lock').open('a') as work_lock:
+                    fcntl.flock(work_lock, fcntl.LOCK_EX)
+                    result=transcribe(data,model,language)
             finally: LOCK.release()
             self.reply(200,result)
         except ValueError as e:

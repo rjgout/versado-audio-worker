@@ -246,3 +246,29 @@ def test_quality_authorization_and_missing_engine(client, monkeypatch):
     qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
     assert c.post('/api/quality/'+qid+'/cancel',headers=h).status_code==200
     assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='cancelled'
+
+
+def test_generation_waits_for_shared_whisper_lock(client, monkeypatch):
+    import fcntl
+    import threading
+    m,c=client; h=login(c)
+    payload={'engine':'supertonic','voice':'M1','source':'bofm','text':'test'}
+    assert c.post('/api/jobs',json=payload,headers=h).status_code==202
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b'\0\0')
+    called=threading.Event()
+    def generate(*args): called.set(); return buf.getvalue()
+    monkeypatch.setattr(m,'synthesize',generate)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    def worker():
+        try: m.worker()
+        except SystemExit: pass
+    with (m.DATA/'heavy-work.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        thread=threading.Thread(target=worker,daemon=True); thread.start()
+        assert not called.wait(0.5)
+        fcntl.flock(lock,fcntl.LOCK_UN)
+        assert called.wait(5)
+    thread.join(timeout=5)
+    assert not thread.is_alive()

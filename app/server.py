@@ -1,4 +1,5 @@
 import hmac
+import fcntl
 import re
 import csv
 import io
@@ -385,7 +386,11 @@ def worker():
             if not row:
                 time.sleep(1); continue
             try:
-                audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'],stored_settings(row['engine'], json.loads(row['settings'])))
+                # The Whisper service holds the same lock for its subprocess.
+                # A service surviving an app restart therefore cannot overlap TTS.
+                with (DATA/'heavy-work.lock').open('a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'],stored_settings(row['engine'], json.loads(row['settings'])))
                 if len(audio_bytes)>100*1024*1024: raise ValueError('Audio is te groot')
                 import io
                 with wave.open(io.BytesIO(audio_bytes),'rb') as w:

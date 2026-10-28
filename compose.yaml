@@ -47,6 +47,7 @@ services:
       WHISPER_TIMEOUT: ${WHISPER_TIMEOUT:-7200}
     volumes:
       - /volume1/docker/versado-audio-worker/whisper-models:/models:ro
+      - /volume1/docker/versado-audio-worker/pronunciation:/coord
     mem_limit: ${WHISPER_MEMORY:-3g}
     networks: [internal]
 networks:
