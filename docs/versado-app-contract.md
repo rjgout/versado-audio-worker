@@ -1,0 +1,5 @@
+# Toekomstige koppeling met Versado.app
+
+Nog geen integratie of bestaande externe API aangenomen. Scheid tekstbron, audioproductie en publicatiebestemming. Een toekomstig contract bevat ten minste: bron, taal en editie, stabiele boek- en hoofdstuk-ID, optionele vers-ID, hash en versie van de exacte brontekst, engine en stem, generatie-instellingen, gebruikte uitspraakregel-ID's en versies, audioversie, kwaliteits- en goedkeuringsstatus, doelopslag en publicatiestatus.
+
+Een gecontroleerde import verifieert bron, editie, teksthash en versvolgorde voordat productie start. Publicatie vereist expliciete goedkeuring, valideert opnieuw de teksthash en schrijft een nieuwe audioversie atomair; geen koppeling aan gewijzigde of onjuiste hoofdstuktekst. Export mag alleen goedgekeurde WAV's en een controleerbaar manifest bevatten. Autorisatie, protocol, schema en rollback worden pas uitgewerkt wanneer Versado.app die mogelijkheden bevestigt. De huidige code leest en schrijft geen Versado.app-opslag of -database.

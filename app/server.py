@@ -18,6 +18,7 @@ import requests
 from werkzeug.security import check_password_hash
 from app.engines import VOICES, synthesize, validate_settings, stored_settings
 from app.pronunciation import Rule, prepare
+from app.quality import compare, inspect_wav
 
 DATA = Path(os.getenv('DATA_DIR', '/data/pronunciation'))
 AUDIO = Path(os.getenv('AUDIO_DIR', '/data/tests'))
@@ -49,6 +50,14 @@ def init():
         if 'is_preview' not in [r['name'] for r in c.execute('PRAGMA table_info(jobs)')]:
             c.execute('ALTER TABLE jobs ADD COLUMN is_preview INTEGER NOT NULL DEFAULT 0')
             c.execute('UPDATE schema_version SET version=2')
+        if 'quality_model' not in [r['name'] for r in c.execute('PRAGMA table_info(jobs)')]:
+            c.execute('ALTER TABLE jobs ADD COLUMN quality_model TEXT')
+        c.execute('''CREATE TABLE IF NOT EXISTS quality_tasks (
+            id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            model TEXT NOT NULL, status TEXT NOT NULL, report TEXT, error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute('UPDATE schema_version SET version=3 WHERE version < 3')
+        c.execute("UPDATE quality_tasks SET status='failed',error='Controle onderbroken door herstart.' WHERE status='running'")
         if not c.execute('SELECT 1 FROM rules WHERE id=1').fetchone():
             c.execute("INSERT INTO rules(id,language,source,original,replacement,status,version) VALUES(1,'nl','bofm','Nephi','Nefi','approved',1)")
             history(c, 1)
@@ -240,9 +249,11 @@ def rule_history(rid):
 def jobs():
     with db() as c:
         if request.method == 'GET':
-            return jsonify([dict(x) for x in c.execute('SELECT * FROM jobs WHERE is_preview=0 ORDER BY created_at DESC, rowid DESC LIMIT 500')])
+            return jsonify([dict(x) for x in c.execute('SELECT jobs.*, (SELECT id FROM quality_tasks WHERE job_id=jobs.id ORDER BY rowid DESC LIMIT 1) AS quality_id, (SELECT status FROM quality_tasks WHERE job_id=jobs.id ORDER BY rowid DESC LIMIT 1) AS quality_status, (SELECT report FROM quality_tasks WHERE job_id=jobs.id ORDER BY rowid DESC LIMIT 1) AS quality_report, (SELECT error FROM quality_tasks WHERE job_id=jobs.id ORDER BY rowid DESC LIMIT 1) AS quality_error FROM jobs WHERE is_preview=0 ORDER BY created_at DESC, jobs.rowid DESC LIMIT 500')])
         p=payload()
         preview = request.path == '/api/previews'
+        quality_model=p.get('quality_model')
+        if quality_model is not None and (preview or quality_model not in ('tiny','base','small')): abort(400, 'Ongeldig Whisper-model')
         if preview != bool(p.get('test_rule')): abort(400, 'Ongeldige preview')
         engine=p.get('engine'); voice=p.get('voice')
         if voice not in available_voices().get(engine,[]): abort(400,'Stem is niet geïnstalleerd of onbekend')
@@ -264,7 +275,7 @@ def jobs():
             spoken='Dit is de uitspraak van ' + rule['replacement'] + '.'
             used=[{'id':rule['id'],'version':rule['version'],'original':rule['original'],'replacement':rule['replacement']}]
         jid=uuid.uuid4().hex
-        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps(settings),json.dumps(used),label,'queued',int(preview)))
+        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview,quality_model) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps(settings),json.dumps(used),label,'queued',int(preview),quality_model))
         return {'id':jid},202
 
 @app.get('/api/previews/<jid>')
@@ -283,6 +294,54 @@ def cleanup_previews():
             if row['audio']: (AUDIO / row['audio']).unlink(missing_ok=True)
             c.execute('DELETE FROM jobs WHERE id=?', (row['id'],))
 
+@app.route('/api/jobs/<jid>/quality', methods=['GET','POST'])
+@protected
+def quality_tasks(jid):
+    with db() as c:
+        job=c.execute('SELECT status,is_preview FROM jobs WHERE id=?',(jid,)).fetchone()
+        if not job or job['is_preview']: abort(404)
+        if request.method=='GET':
+            return jsonify([dict(row) for row in c.execute('SELECT * FROM quality_tasks WHERE job_id=? ORDER BY rowid DESC',(jid,))])
+        if job['status']!='done': abort(409, 'Opname is nog niet klaar')
+        model=payload().get('model','base')
+        if model not in ('tiny','base','small'): abort(400, 'Onbekend Whisper-model')
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute("SELECT count(*) FROM quality_tasks WHERE status IN ('queued','running')").fetchone()[0]>=25: abort(429, 'Wachtrij is vol')
+        if c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running')",(jid,)).fetchone(): abort(409, 'Controle loopt al')
+        qid=uuid.uuid4().hex
+        c.execute("INSERT INTO quality_tasks(id,job_id,model,status) VALUES(?,?,?,'queued')",(qid,jid,model))
+        return {'id':qid},202
+
+@app.post('/api/quality/<qid>/cancel')
+@protected
+def cancel_quality(qid):
+    with db() as c:
+        changed=c.execute("UPDATE quality_tasks SET status='cancelled' WHERE id=? AND status='queued'",(qid,)).rowcount
+        if not changed: abort(409, 'Alleen controles in de wachtrij kunnen worden gestopt')
+    return {'ok':True}
+
+
+def run_quality(task):
+    with db() as c:
+        job=c.execute('SELECT * FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
+    if not job or not job['audio']: raise ValueError('Audiobestand ontbreekt')
+    data=(AUDIO/job['audio']).read_bytes()
+    if len(data)>100*1024*1024: raise ValueError('Audiobestand te groot')
+    audio_stats=inspect_wav(data)
+    response=requests.post(os.getenv('WHISPER_URL','http://whisper:8090')+'/transcribe',params={'model':task['model'],'language':job['language'].split('-')[0]},data=data,headers={'Content-Type':'audio/wav'},timeout=(5, min(28800,max(60,int(os.getenv('WHISPER_TIMEOUT','7200'))))))
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as e:
+        try: detail=response.json().get('error','Whisper-controle mislukt')
+        except (ValueError, AttributeError): detail='Whisper-controle mislukt'
+        raise ValueError(str(detail)[:200]) from e
+    result=response.json()
+    if not isinstance(result.get('text'),str): raise ValueError('Ongeldig Whisper-antwoord')
+    report=compare(job['spoken'], result['text'])
+    report.update({'transcript':result['text'],'audio':audio_stats,'engine':result})
+    if audio_stats['near_silence']: report['findings'].append({'type':'near_silence','message':'De opname bevat vrijwel uitsluitend stilte.'})
+    return report
+
 @app.route('/api/jobs/<jid>', methods=['PATCH','DELETE'])
 @protected
 def job_update(jid):
@@ -292,7 +351,7 @@ def job_update(jid):
         if request.method == 'PATCH':
             c.execute('UPDATE jobs SET label=? WHERE id=?',(bounded(payload().get('label',''),'label',200,False),jid))
         else:
-            if row['status'] in ('queued','running'): abort(409)
+            if row['status'] in ('queued','running') or c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running')",(jid,)).fetchone(): abort(409)
             c.execute('DELETE FROM jobs WHERE id=?',(jid,))
             if row['audio']: (AUDIO / row['audio']).unlink(missing_ok=True)
     return {'ok':True}
@@ -312,6 +371,17 @@ def worker():
                 c.execute('BEGIN IMMEDIATE')
                 row=c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
                 if row: c.execute("UPDATE jobs SET status='running' WHERE id=?",(row['id'],))
+                task=None
+                if not row:
+                    task=c.execute("SELECT * FROM quality_tasks WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
+                    if task: c.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(task['id'],))
+            if task:
+                try:
+                    report=run_quality(task)
+                    with db() as c: c.execute("UPDATE quality_tasks SET status='done',report=? WHERE id=?",(json.dumps(report,ensure_ascii=False),task['id']))
+                except Exception as e:
+                    with db() as c: c.execute("UPDATE quality_tasks SET status='failed',error=? WHERE id=?",(str(e)[:500],task['id']))
+                continue
             if not row:
                 time.sleep(1); continue
             try:
@@ -324,7 +394,10 @@ def worker():
                 with temp.open('wb') as f:
                     f.write(audio_bytes); f.flush(); os.fsync(f.fileno())
                 os.replace(temp,AUDIO/filename)
-                with db() as c: c.execute("UPDATE jobs SET status='done',audio=? WHERE id=?",(filename,row['id']))
+                with db() as c:
+                    c.execute("UPDATE jobs SET status='done',audio=? WHERE id=?",(filename,row['id']))
+                    if row['quality_model']:
+                        c.execute("INSERT INTO quality_tasks(id,job_id,model,status) VALUES(?,?,?,'queued')",(uuid.uuid4().hex,row['id'],row['quality_model']))
             except Exception as e:
                 with db() as c: c.execute("UPDATE jobs SET status='failed',error=? WHERE id=?",(str(e)[:500],row['id']))
         except Exception:

@@ -200,3 +200,49 @@ def test_supertonic_custom_wire_parameters(monkeypatch):
     options={'steps':15,'speed':0.85,'silence_duration':0.45}
     assert engines.synthesize('supertonic','M5','Hallo','nl-NL',options)==b'WAV'
     assert seen['json']=={'text':'Hallo','voice':'M5','lang':'nl',**options}
+
+
+def test_quality_queue_report_and_recovery(client, monkeypatch):
+    import json
+    m,c=client; h=login(c)
+    request={'engine':'supertonic','voice':'M5','source':'bofm','text':'Nephi ging verder'}
+    jid=c.post('/api/jobs',json=request,headers=h).json['id']
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b'\0\0'*16000)
+    (m.AUDIO/(jid+'.wav')).write_bytes(buf.getvalue())
+    with m.db() as db:
+        db.execute("UPDATE jobs SET status='done',audio=? WHERE id=?",(jid+'.wav',jid))
+    resp=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h)
+    assert resp.status_code==202
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {'text':'Nefi ging ging verder','model':'base'}
+    def post(url,**kw):
+        assert kw['params']=={'model':'base','language':'nl'}
+        return Response()
+    monkeypatch.setattr(m.requests,'post',post)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    task=c.get('/api/jobs/'+jid+'/quality').json[0]
+    report=json.loads(task['report'])
+    assert task['status']=='done' and report['status']=='manual_review'
+    assert any(x['type']=='possible_repetition' for x in report['findings'])
+    assert report['audio']['near_silence']
+    assert (m.AUDIO/(jid+'.wav')).exists()
+    qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'tiny'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(qid,))
+    m.init()
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='failed'
+
+
+def test_quality_authorization_and_missing_engine(client, monkeypatch):
+    m,c=client; h=login(c)
+    assert m.app.test_client().get('/api/jobs/not-real/quality').status_code==401
+    jid=c.post('/api/jobs',json={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'test'},headers=h).json['id']
+    assert c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).status_code==409
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',audio='missing.wav' WHERE id=?",(jid,))
+    assert c.post('/api/jobs/'+jid+'/quality',json={'model':'base.en'},headers=h).status_code==400
+    qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
+    assert c.post('/api/quality/'+qid+'/cancel',headers=h).status_code==200
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='cancelled'

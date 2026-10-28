@@ -43,3 +43,16 @@ jobs:
       - name: Container smoke test (no TTS engines)
         if: github.event_name == 'pull_request'
         run: python scripts/smoke.py
+      - name: Build Whisper CPU image (PR only)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: whisper/Dockerfile
+          load: true
+          tags: versado-whisper:ci
+          cache-from: type=gha,scope=whisper
+          cache-to: type=gha,mode=max,scope=whisper
+      - name: Whisper service smoke test (no model download)
+        if: github.event_name == 'pull_request'
+        run: python scripts/smoke_whisper.py

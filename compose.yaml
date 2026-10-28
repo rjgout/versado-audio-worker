@@ -11,6 +11,8 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       PIPER_HOST: piper
       SUPERTONIC_URL: http://supertonic:8000
+      WHISPER_URL: http://whisper:8090
+      WHISPER_TIMEOUT: ${WHISPER_TIMEOUT:-7200}
     volumes:
       - /volume1/docker/versado-audio-worker/models:/data/models:ro
       - /volume1/docker/versado-audio-worker/tests:/data/tests
@@ -33,6 +35,19 @@ services:
     environment:
       SUPERTONIC_MODEL: supertonic-3
     mem_limit: ${SUPERTONIC_MEMORY:-4g}
+    networks: [internal]
+  whisper:
+    profiles: [quality]
+    build:
+      context: .
+      dockerfile: whisper/Dockerfile
+    restart: unless-stopped
+    environment:
+      WHISPER_THREADS: ${WHISPER_THREADS:-2}
+      WHISPER_TIMEOUT: ${WHISPER_TIMEOUT:-7200}
+    volumes:
+      - /volume1/docker/versado-audio-worker/whisper-models:/models:ro
+    mem_limit: ${WHISPER_MEMORY:-3g}
     networks: [internal]
 networks:
   internal:
