@@ -30,7 +30,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id o
 $('#check-whisper').onclick=async()=>{
   const out=$('#whisper-health');out.textContent='Beschikbaarheid controleren…';
   try{const data=await api('/api/quality/health?model='+encodeURIComponent($('#quality-model').value));
-    out.textContent=!data.reachable?'Whisper-service niet bereikbaar':`Service bereikbaar · binary ${data.binary_available?'aanwezig':'ontbreekt'} · model ${data.model_present?'aanwezig':'ontbreekt'} · checksum ${data.checksum_valid===true?'correct':data.checksum_valid===false?'ongeldig':'niet gecontroleerd'} · ${data.ready?'klaar voor analyse':'niet klaar'}`;
+    out.textContent=!data.reachable?'Whisper-service niet bereikbaar':`Service bereikbaar · binary ${data.binary_available?'aanwezig':'ontbreekt'} · model ${data.model_present===true?'aanwezig':data.model_present===false?'ontbreekt':'onbekend'} · checksum ${data.checksum_valid===true?'correct':data.checksum_valid===false?'ongeldig':'niet gecontroleerd'} · ${data.ready?'klaar voor analyse':'niet klaar'}${data.error?' · '+data.error:''}`;
   }catch(e){out.textContent=e.message}
 };
 $('#generate').onsubmit=async e=>{e.preventDefault();try{await api('/api/jobs',{method:'POST',body:JSON.stringify({...selection(),text:$('#text').value,label:$('#label').value,quality_model:$('#quality-enabled').checked?$('#quality-model').value:null})});msg('Opdracht toegevoegd aan de wachtrij.');await refresh()}catch(e){msg(e)}};
