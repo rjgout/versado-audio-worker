@@ -74,7 +74,7 @@ def test_supertonic_request(monkeypatch):
     def post(url,**kwargs): seen.update(url=url,**kwargs); return Response()
     monkeypatch.setattr(engines.requests,'post',post)
     assert engines.synthesize('supertonic','F1','Hallo') == b'WAV'
-    assert seen['json']=={'text':'Hallo','voice':'F1','lang':'nl','steps':12,'speed':1.0}
+    assert seen['json']=={'text':'Hallo','voice':'F1','lang':'nl','steps':12,'speed':1.0,'silence_duration':0.3}
     with pytest.raises(ValueError): engines.synthesize('supertonic','wrong','Hallo')
 
 def test_piper_protocol(monkeypatch):
@@ -135,4 +135,68 @@ def test_supertonic_job_settings_and_existing_metadata(client):
     second = c.post('/api/jobs', json=payload, headers=h).json['id']
     jobs = {job['id']: job for job in c.get('/api/jobs').json}
     assert json.loads(jobs[first]['settings']) == {'total_steps': 12, 'speed': 1.0}
-    assert json.loads(jobs[second]['settings']) == {'steps': 12, 'speed': 1.0}
+    assert json.loads(jobs[second]['settings']) == {'steps': 12, 'speed': 1.0, 'silence_duration': 0.3}
+
+
+@pytest.mark.parametrize('settings', [
+    {'speed':0.69}, {'speed':2.01}, {'speed':True}, {'speed':'1'},
+    {'speed':float('nan')}, {'steps':0}, {'steps':101}, {'steps':1.5},
+    {'steps':False}, {'silence_duration':-1}, {'silence_duration':10.1},
+    {'unknown':1}, [], None,
+])
+def test_invalid_supertonic_settings(client, settings):
+    _, c=client; h=login(c)
+    data={'engine':'supertonic','voice':'M5','source':'bible','text':'Hallo','settings':settings}
+    assert c.post('/api/jobs',json=data,headers=h).status_code == 400
+
+@pytest.mark.parametrize('settings', [
+    {'speed':1.0,'steps':12,'silence_duration':0.3},
+    {'speed':0.9,'steps':12,'silence_duration':0.35},
+    {'speed':0.85,'steps':12,'silence_duration':0.45},
+    {'speed':1.23,'steps':20,'silence_duration':1.5},
+])
+def test_profiles_snapshots_previews_and_worker(client, monkeypatch, settings):
+    import json
+    m,c=client; h=login(c)
+    payload={'engine':'supertonic','voice':'M5','source':'bofm','text':'Nephi', 'settings':settings}
+    jid=c.post('/api/jobs',json=payload,headers=h).json['id']
+    assert json.loads(c.get('/api/jobs').json[0]['settings']) == settings
+    preview=c.post('/api/previews',json={**payload,'test_rule':1},headers=h)
+    assert preview.status_code==202
+    with m.db() as db:
+        row=db.execute('SELECT settings FROM jobs WHERE id=?',(preview.json['id'],)).fetchone()
+        assert json.loads(row['settings']) == settings
+        db.execute("UPDATE jobs SET status='failed' WHERE id=?",(preview.json['id'],))
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(22050); wav.writeframes(b'\x00\x00')
+    called=[]
+    def fake(*args): called.append(args); return buf.getvalue()
+    monkeypatch.setattr(m,'synthesize',fake)
+    def stop(_): raise SystemExit()
+    monkeypatch.setattr(m.time,'sleep',stop)
+    with pytest.raises(SystemExit): m.worker()
+    assert called[0][4] == settings
+    assert c.get('/api/jobs').json[0]['status']=='done'
+
+def test_legacy_queue_and_piper_settings(client):
+    from app.engines import stored_settings
+    assert stored_settings('supertonic',{'total_steps':12,'speed':1.0}) == {'steps':12,'speed':1.0,'silence_duration':0.3}
+    assert stored_settings('piper',{'total_steps':12,'speed':1.0}) == {}
+    _,c=client; h=login(c)
+    payload={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'Hallo'}
+    assert c.post('/api/jobs',json={**payload,'settings':{'speed':0.9}},headers=h).status_code == 400
+    assert c.post('/api/jobs',json=payload,headers=h).status_code == 202
+
+
+def test_supertonic_custom_wire_parameters(monkeypatch):
+    from app import engines
+    seen={}
+    class Response:
+        content=b'WAV'
+        def raise_for_status(self): pass
+    def post(url, **kwargs): seen.update(kwargs); return Response()
+    monkeypatch.setattr(engines.requests, 'post', post)
+    options={'steps':15,'speed':0.85,'silence_duration':0.45}
+    assert engines.synthesize('supertonic','M5','Hallo','nl-NL',options)==b'WAV'
+    assert seen['json']=={'text':'Hallo','voice':'M5','lang':'nl',**options}

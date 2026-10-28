@@ -16,7 +16,7 @@ from functools import wraps
 from flask import Flask, abort, jsonify, request, send_file, session, render_template
 import requests
 from werkzeug.security import check_password_hash
-from app.engines import VOICES, synthesize
+from app.engines import VOICES, synthesize, validate_settings, stored_settings
 from app.pronunciation import Rule, prepare
 
 DATA = Path(os.getenv('DATA_DIR', '/data/pronunciation'))
@@ -246,6 +246,10 @@ def jobs():
         if preview != bool(p.get('test_rule')): abort(400, 'Ongeldige preview')
         engine=p.get('engine'); voice=p.get('voice')
         if voice not in available_voices().get(engine,[]): abort(400,'Stem is niet geïnstalleerd of onbekend')
+        try:
+            settings=validate_settings(engine, p.get('settings', {}))
+        except ValueError as e:
+            abort(400, str(e))
         language=p.get('language','nl'); source=p.get('source','bofm')
         if source not in ('bofm','bible') or not valid_language(language): abort(400)
         original=bounded(p.get('text'),'tekst',20000)
@@ -260,7 +264,7 @@ def jobs():
             spoken='Dit is de uitspraak van ' + rule['replacement'] + '.'
             used=[{'id':rule['id'],'version':rule['version'],'original':rule['original'],'replacement':rule['replacement']}]
         jid=uuid.uuid4().hex
-        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps({'steps':12,'speed':1.0} if engine == 'supertonic' else {'total_steps':12,'speed':1.0}),json.dumps(used),label,'queued',int(preview)))
+        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,is_preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(jid,original,spoken,engine,voice,language,source,json.dumps(settings),json.dumps(used),label,'queued',int(preview)))
         return {'id':jid},202
 
 @app.get('/api/previews/<jid>')
@@ -311,7 +315,7 @@ def worker():
             if not row:
                 time.sleep(1); continue
             try:
-                audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'])
+                audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'],stored_settings(row['engine'], json.loads(row['settings'])))
                 if len(audio_bytes)>100*1024*1024: raise ValueError('Audio is te groot')
                 import io
                 with wave.open(io.BytesIO(audio_bytes),'rb') as w:

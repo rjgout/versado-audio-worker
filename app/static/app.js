@@ -4,13 +4,37 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...(opts.body?{'Content-Type':'application/json'}:{}),'X-CSRF-Token':csrf,...opts.headers}});if(!r.ok)throw Error((await r.text()).replace(/<[^>]*>/g,' ').trim().slice(0,220));return r.json()}
 function msg(e){$('#message').textContent=e instanceof Error?e.message:e}
 function selectVoices(){let e=$('#engine').value;$('#voice').innerHTML=voices[e].map(v=>`<option>${esc(v)}</option>`).join('');let saved=localStorage.getItem('voice_'+e);if(voices[e].includes(saved))$('#voice').value=saved}
-function selection(){return {engine:$('#engine').value,voice:$('#voice').value,source:$('#source').value,language:'nl'}}
-async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();await refresh()}catch(e){msg(e)}}
+const profiles={standard:{speed:100,steps:12,silence:300},scripture:{speed:90,steps:12,silence:350},extra:{speed:85,steps:12,silence:450}};
+function readSettings(){return {speed:Number($('#speed').value)/100,steps:Number($('#steps').value),silence_duration:Number($('#silence').value)/1000}}
+function settingsChanged(custom=true){
+  $('#speed-value').value=$('#speed').value+'%';$('#steps-value').value=$('#steps').value;$('#silence-value').value=$('#silence').value+' ms';
+  if(custom)$('#profile').value='custom';
+  localStorage.setItem('supertonic_settings',JSON.stringify({speed:Number($('#speed').value),steps:Number($('#steps').value),silence:Number($('#silence').value),profile:$('#profile').value}));
+}
+function setProfile(name){const p=profiles[name];if(!p)return;for(const key of ['speed','steps','silence'])$('#'+key).value=p[key];$('#profile').value=name;settingsChanged(false)}
+function loadSettings(){
+  try{const s=JSON.parse(localStorage.getItem('supertonic_settings'));if(s && Number.isInteger(s.speed) && s.speed>=70 && s.speed<=200 && Number.isInteger(s.steps) && s.steps>=1 && s.steps<=100 && Number.isInteger(s.silence) && s.silence>=0 && s.silence<=10000 && s.silence%50===0 && ['standard','scripture','extra','custom'].includes(s.profile)){for(const key of ['speed','steps','silence'])$('#'+key).value=s[key];$('#profile').value=s.profile;settingsChanged(false);return}}catch(e){}
+  setProfile('standard');
+}
+for(const key of ['speed','steps','silence'])$('#'+key).addEventListener('input',()=>settingsChanged());
+$('#profile').addEventListener('change',()=>{if($('#profile').value==='custom')settingsChanged(false);else setProfile($('#profile').value)});
+$('#reset-settings').addEventListener('click',()=>setProfile('standard'));
+function syncEngineSettings(){$('#voice-settings').hidden=$('#engine').value!=='supertonic'}
+function selection(){let engine=$('#engine').value;return {engine,voice:$('#voice').value,source:$('#source').value,language:'nl',settings:engine==='supertonic'?readSettings():{}}}
+loadSettings();syncEngineSettings();
+async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();syncEngineSettings();await refresh()}catch(e){msg(e)}}
 $('#loginform').onsubmit=async e=>{e.preventDefault();try{csrf=(await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})})).csrf;$('#password').value='';await load()}catch(e){msg(e)}};
 $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};
-$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices()};$('#voice').onchange=()=>localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);$('#source').onchange=()=>renderRules();
+$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);$('#source').onchange=()=>renderRules();
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id of ['lab','dictionary'])$('#'+id).hidden=id!==b.dataset.tab});
 $('#generate').onsubmit=async e=>{e.preventDefault();try{await api('/api/jobs',{method:'POST',body:JSON.stringify({...selection(),text:$('#text').value,label:$('#label').value})});msg('Opdracht toegevoegd aan de wachtrij.');await refresh()}catch(e){msg(e)}};
+function formatSettings(engine, raw){
+  try{const s=JSON.parse(raw);if(engine==='supertonic'){
+    const steps=s.steps ?? s.total_steps;
+    const silence=s.silence_duration;
+    return 'Spreeksnelheid: '+Math.round(s.speed*100)+'%\nGeneratiestappen: '+steps+(s.total_steps!==undefined?' (historische metadata)':'')+'\nPauze tussen tekstfragmenten: '+(silence===undefined?'niet vastgelegd':Math.round(silence*1000)+' ms');
+  }return 'Instellingen: '+raw}catch(e){return 'Instellingen: '+raw}
+}
 // Keep media elements and details nodes attached across background updates.
 const jobCards = new Map(), ruleCards = new Map();
 function updateJobs(jobs){
@@ -33,7 +57,7 @@ function updateJobs(jobs){
     card.querySelector('.muted').textContent=`${j.engine} · ${j.voice} · ${j.created_at} · ${j.status} ${j.error||''}`;
     card.querySelector('.original').textContent='Origineel: '+j.original;
     card.querySelector('.spoken').textContent='Uitgesproken: '+j.spoken;
-    card.querySelector('pre').textContent=j.settings+'\n'+j.rules;
+    card.querySelector('pre').textContent=formatSettings(j.engine,j.settings)+'\nUitspraakregels: '+j.rules;
     card.querySelector('.delete').hidden=['queued','running'].includes(j.status);
     const area=card.querySelector('.job-audio');
     if(j.status==='done'&&!area.querySelector('audio')){
