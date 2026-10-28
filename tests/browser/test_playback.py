@@ -26,6 +26,7 @@ def test_playback_survives_polling():
         sound.writeframes(b'\0\0' * 8000 * 35)
     audio = wav.getvalue()
     state = {'jobs': [dict(id='one', label='Eerste', engine='piper', voice='ronnie', created_at='nu', status='done', error='', original='Hallo', spoken='Hallo', settings='{}', rules='[]'), dict(id='two', label='Volgende', engine='piper', voice='ronnie', created_at='nu', status='queued', error='', original='Test', spoken='Test', settings='{}', rules='[]')]}
+    sent = {}
     rules = [dict(id=1, language='nl', source='bofm', original='Nephi', replacement='Nefi', status='proposal', version=1, note='', engine=None, voice=None)]
     try:
         with sync_playwright() as p:
@@ -35,10 +36,13 @@ def test_playback_survives_polling():
             def routes(route):
                 path = route.request.url.split('?')[0]
                 if path.endswith('/api/session'): result = {'authenticated': True, 'csrf': 'test'}
-                elif path.endswith('/api/voices'): result = {'piper': ['ronnie'], 'supertonic': []}
+                elif path.endswith('/api/voices'): result = {'piper': ['ronnie'], 'supertonic': ['M5']}
+                elif path.endswith('/api/jobs') and route.request.method == 'POST':
+                    sent['job'] = route.request.post_data_json; result = {'id':'new'}
                 elif path.endswith('/api/jobs'): result = state['jobs']
                 elif path.endswith('/api/rules'): result = rules
-                elif path.endswith('/api/previews') and route.request.method == 'POST': result = {'id': 'preview'}
+                elif path.endswith('/api/previews') and route.request.method == 'POST':
+                    sent['preview'] = route.request.post_data_json; result = {'id': 'preview'}
                 elif path.endswith('/api/previews/preview'): result = {'id': 'preview', 'status': 'done'}
                 elif path.endswith('/audio'):
                     route.fulfill(status=200, body=audio, content_type='audio/wav', headers={'Accept-Ranges': 'bytes'}); return
@@ -87,6 +91,32 @@ def test_playback_survives_polling():
             preview.evaluate('(a) => { window.originalPreview = a; a.play() }')
             page.wait_for_timeout(9000)
             assert preview.evaluate('(a) => a === window.originalPreview && !a.paused && a.currentTime > 6')
+            page.locator('[data-tab="lab"]').click()
+            page.locator('#engine').select_option('supertonic')
+            assert page.locator('#voice-settings').is_visible()
+            page.locator('#profile').select_option('scripture')
+            assert page.locator('#speed-value').inner_text() == '90%'
+            page.locator('#profile').select_option('extra')
+            assert page.locator('#silence-value').inner_text() == '450 ms'
+            page.locator('#speed').fill('95')
+            assert page.locator('#profile').input_value() == 'custom'
+            page.locator('[data-tab="dictionary"]').click()
+            page.locator('[data-rule-id="1"] .play').click()
+            page.wait_for_timeout(200)
+            assert sent['preview']['settings']=={'speed':0.95,'steps':12,'silence_duration':0.45}
+            page.locator('[data-tab="lab"]').click()
+            page.locator('#text').fill('Test')
+            page.locator('#generate button[type=submit], #generate button:not([type])').last.click()
+            page.wait_for_timeout(200)
+            assert sent['job']['settings']=={'speed':0.95,'steps':12,'silence_duration':0.45}
+            page.reload()
+            page.wait_for_selector('#workspace:not([hidden])')
+            assert page.locator('#profile').input_value() == 'custom'
+            assert page.locator('#speed').input_value() == '95'
+            page.locator('#reset-settings').click()
+            assert page.locator('#speed-value').inner_text() == '100%'
+            page.locator('#engine').select_option('piper')
+            assert not page.locator('#voice-settings').is_visible()
             browser.close()
     finally:
         server.shutdown()

@@ -1,6 +1,7 @@
 """Adapters for the Supertonic native HTTP API and Wyoming Piper."""
 import asyncio
 import io
+import math
 import wave
 import requests
 from wyoming.client import AsyncTcpClient
@@ -9,12 +10,42 @@ from wyoming.audio import AudioStart, AudioChunk, AudioStop
 
 VOICES = {'piper': ['nl_NL-ronnie-medium', 'nl_NL-pim-medium', 'nl_NL-alex-medium', 'nl_NL-mls-medium', 'nl_BE-nathalie-medium', 'nl_BE-rdh-medium'], 'supertonic': [f'{s}{n}' for s in 'MF' for n in range(1, 6)]}
 
-def synthesize(engine, voice, text, language='nl'):
+SUPERTONIC_DEFAULTS = {'steps': 12, 'speed': 1.0, 'silence_duration': 0.3}
+
+def validate_settings(engine, settings):
+    if not isinstance(settings, dict):
+        raise ValueError('Instellingen moeten een object zijn')
+    if engine == 'piper':
+        if settings: raise ValueError('Piper ondersteunt hier geen extra instellingen')
+        return {}
+    if engine != 'supertonic' or set(settings) - set(SUPERTONIC_DEFAULTS):
+        raise ValueError('Onbekende instelling')
+    result = {**SUPERTONIC_DEFAULTS, **settings}
+    steps = result['steps']
+    if type(steps) is not int or not 1 <= steps <= 100:
+        raise ValueError('Stappen moeten een geheel getal tussen 1 en 100 zijn')
+    for name, low, high in [('speed', 0.7, 2.0), ('silence_duration', 0.0, 10.0)]:
+        value = result[name]
+        if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+            raise ValueError('Ongeldige waarde voor ' + name)
+        result[name] = float(value)
+    return result
+
+def stored_settings(engine, settings):
+    # Jobs queued by older releases may use total_steps or omit silence.
+    if engine == 'piper': return {}
+    settings = dict(settings)
+    if 'total_steps' in settings:
+        settings.setdefault('steps', settings.pop('total_steps'))
+    return validate_settings(engine, settings)
+
+def synthesize(engine, voice, text, language='nl', settings=None):
     if voice not in VOICES.get(engine, []):
         raise ValueError('Onbekend model of stem')
     if engine == 'supertonic':
         import os
-        response = requests.post(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/tts', json={'text': text, 'voice': voice, 'lang': language.split('-')[0], 'steps': 12, 'speed': 1.0}, timeout=(10, 1800))
+        options = stored_settings(engine, settings or {})
+        response = requests.post(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/tts', json={'text': text, 'voice': voice, 'lang': language.split('-')[0], **options}, timeout=(10, 1800))
         response.raise_for_status()
         return response.content
     return asyncio.run(_piper(voice, text))
