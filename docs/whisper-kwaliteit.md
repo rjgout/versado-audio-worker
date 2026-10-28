@@ -51,3 +51,7 @@ Stop de stack voordat u een consistente back-up van zowel `pronunciation` (inclu
 ## Herkomst en toekomstige koppeling
 
 De Whisper-image gebruikt whisper.cpp v1.7.6 commit `a8d002cfd879315632a579e73f0148d06959de36` met native optimalisatie, AVX, AVX2, AVX512, FMA, F16C en BMI2 expliciet uitgeschakeld. In de gecontroleerde bouw moet de J4125 nog worden getest. Zie [versado-app-contract.md](versado-app-contract.md) voor de toekomstige scheiding tussen tekstbron, audioproductie en publicatie. Er wordt geen Versado.app-database of -opslag aangeraakt. Bevindingen met indicatieve tijdvakken kunnen later aan stabiele fragment-ID's en versies worden gekoppeld; de huidige interne Whisper-fragmenten zijn geen vervangbare audiobestanden.
+
+## Werkelijk uitgevoerde ontwikkeltests
+
+Met de echte whisper.cpp-binary en het gecontroleerde meertalige tiny-model is lokaal een Engelstalige upstream-opname getranscribeerd. Daarnaast is een synthetische Nederlandstalige eSpeak NG-opname getest met de tekst “En ik, Nefi, ging verder naar het beloofde land.” De herkenning was “en in de leven ging met de harte gelofde land.”: deze test bevestigt een Nederlandse aanroep maar laat aanzienlijke herkenningsfouten zien. Dit is geen M5- of NAS-meting en zegt niet hoe base of small presteren. Een lopende echte tiny-aanroep is lokaal geannuleerd; daarna was het Whisper-proces verdwenen. De GitHub-smoketest gebruikt gesimuleerde engines en controleert ook herstart tijdens een actieve analyse.
