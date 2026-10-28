@@ -219,7 +219,7 @@ def test_quality_queue_report_and_recovery(client, monkeypatch):
         def raise_for_status(self): pass
         def json(self): return {'text':'Nefi ging ging verder','model':'base'}
     def post(url,**kw):
-        assert kw['params']=={'model':'base','language':'nl'}
+        assert kw['params']['model']=='base' and kw['params']['language']=='nl' and kw['params']['task']==resp.json['id']
         return Response()
     monkeypatch.setattr(m.requests,'post',post)
     monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
@@ -233,7 +233,7 @@ def test_quality_queue_report_and_recovery(client, monkeypatch):
     qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'tiny'},headers=h).json['id']
     with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(qid,))
     m.init()
-    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='failed'
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='interrupted'
 
 
 def test_quality_authorization_and_missing_engine(client, monkeypatch):
@@ -272,3 +272,51 @@ def test_generation_waits_for_shared_whisper_lock(client, monkeypatch):
         assert called.wait(5)
     thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_running_cancel_and_interrupted_recovery(client, monkeypatch):
+    m,c=client; h=login(c)
+    jid=c.post('/api/jobs',json={'engine':'supertonic','voice':'M1','source':'bible','text':'tekst'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',audio='safe.wav' WHERE id=?",(jid,))
+    (m.AUDIO/'safe.wav').write_bytes(b'existing')
+    qid=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(qid,))
+    calls=[]
+    class Response:
+        def raise_for_status(self): pass
+    def post(url,**kwargs): calls.append((url,kwargs)); return Response()
+    monkeypatch.setattr(m.requests,'post',post)
+    assert c.post('/api/quality/'+qid+'/cancel',headers=h).status_code==200
+    assert calls[0][1]['params']=={'task':qid}
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='cancelled'
+    assert (m.AUDIO/'safe.wav').read_bytes()==b'existing'
+    next_id=c.post('/api/jobs/'+jid+'/quality',json={'model':'base'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='running' WHERE id=?",(next_id,))
+    m.init()
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='interrupted'
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    assert calls[-1][1]['params']=={'task':next_id}
+    assert c.get('/api/jobs/'+jid+'/quality').json[0]['status']=='failed'
+    assert (m.AUDIO/'safe.wav').read_bytes()==b'existing'
+
+
+def test_repeated_analysis_history_and_unavailable_service(client, monkeypatch):
+    m,c=client; h=login(c)
+    jid=c.post('/api/jobs',json={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bible','text':'tekst'},headers=h).json['id']
+    buf=io.BytesIO()
+    with wave.open(buf,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000);w.writeframes(b'\0\0'*100)
+    original=buf.getvalue();(m.AUDIO/'old.wav').write_bytes(original)
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',audio='old.wav' WHERE id=?",(jid,))
+    first=c.post('/api/jobs/'+jid+'/quality',json={'model':'tiny'},headers=h).json['id']
+    with m.db() as db: db.execute("UPDATE quality_tasks SET status='done',report='{}' WHERE id=?",(first,))
+    second=c.post('/api/jobs/'+jid+'/quality',json={'model':'small'},headers=h).json['id']
+    def offline(*a,**kw): raise m.requests.ConnectionError('offline')
+    monkeypatch.setattr(m.requests,'post',offline)
+    monkeypatch.setattr(m.time,'sleep',lambda _: (_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    history=c.get('/api/jobs/'+jid+'/quality').json
+    assert len(history)==2 and history[0]['id']==second and history[0]['status']=='interrupted'
+    assert history[1]['id']==first and history[1]['report']=='{}'
+    assert (m.AUDIO/'old.wav').read_bytes()==original

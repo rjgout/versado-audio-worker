@@ -27,6 +27,12 @@ $('#loginform').onsubmit=async e=>{e.preventDefault();try{csrf=(await api('/api/
 $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};
 $('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);$('#source').onchange=()=>renderRules();
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id of ['lab','dictionary'])$('#'+id).hidden=id!==b.dataset.tab});
+$('#check-whisper').onclick=async()=>{
+  const out=$('#whisper-health');out.textContent='Beschikbaarheid controleren…';
+  try{const data=await api('/api/quality/health?model='+encodeURIComponent($('#quality-model').value));
+    out.textContent=!data.reachable?'Whisper-service niet bereikbaar':`Service bereikbaar · binary ${data.binary_available?'aanwezig':'ontbreekt'} · model ${data.model_present?'aanwezig':'ontbreekt'} · checksum ${data.checksum_valid===true?'correct':data.checksum_valid===false?'ongeldig':'niet gecontroleerd'} · ${data.ready?'klaar voor analyse':'niet klaar'}`;
+  }catch(e){out.textContent=e.message}
+};
 $('#generate').onsubmit=async e=>{e.preventDefault();try{await api('/api/jobs',{method:'POST',body:JSON.stringify({...selection(),text:$('#text').value,label:$('#label').value,quality_model:$('#quality-enabled').checked?$('#quality-model').value:null})});msg('Opdracht toegevoegd aan de wachtrij.');await refresh()}catch(e){msg(e)}};
 function formatSettings(engine, raw){
   try{const s=JSON.parse(raw);if(engine==='supertonic'){
@@ -48,7 +54,9 @@ function updateJobs(jobs){
     const id=String(j.id); let card=jobCards.get(id);
     if(!card){
       card=document.createElement('article');card.className='item';card.dataset.jobId=id;
-      card.innerHTML='<h3></h3><p class="muted"></p><div class="job-audio"></div><details><summary>Tekst en instellingen</summary><p class="original"></p><p class="spoken"></p><pre></pre><p class="quality"></p><button type="button" class="cancel-quality" hidden>Controle uit wachtrij halen</button></details><button class="rename">Label wijzigen</button><button class="delete">Verwijderen</button>';
+      card.innerHTML='<h3></h3><p class="muted"></p><div class="job-audio"></div><details><summary>Tekst en instellingen</summary><p class="original"></p><p class="spoken"></p><pre></pre><p class="quality"></p><button type="button" class="cancel-quality" hidden>Controle stoppen</button></details><label class="quality-controls">Whisper-model <select class="quality-model"><option value="base">Base</option><option value="tiny">Tiny</option><option value="small">Small</option></select></label><button class="quality-start">Controleer audiokwaliteit</button><button class="quality-history">Kwaliteitsrapporten</button><div class="quality-reports"></div><button class="rename">Label wijzigen</button><button class="delete">Verwijderen</button>';
+      card.querySelector('.quality-start').onclick=async()=>{try{await api('/api/jobs/'+encodeURIComponent(id)+'/quality',{method:'POST',body:JSON.stringify({model:card.querySelector('.quality-model').value})});msg('Kwaliteitscontrole toegevoegd aan de wachtrij.');refresh()}catch(e){msg(e)}};
+      card.querySelector('.quality-history').onclick=()=>showReports(card,id);
       card.querySelector('.rename').onclick=()=>window.renameJob(id);
       card.querySelector('.delete').onclick=()=>window.deleteJob(id);
       container.prepend(card);jobCards.set(id,card);
@@ -60,19 +68,46 @@ function updateJobs(jobs){
     card.querySelector('pre').textContent=formatSettings(j.engine,j.settings)+'\nUitspraakregels: '+j.rules;
     let quality='';
     if(j.quality_status){
-      quality='Whisper-controle: '+({queued:'in wachtrij',running:'audio analyseren',failed:'mislukt',done:'handmatig controleren',cancelled:'gestopt'}[j.quality_status]||j.quality_status);
+      quality='Whisper-controle: '+({queued:'in wachtrij',running:'audio analyseren',failed:'mislukt',done:'handmatig controleren',cancelled:'gestopt',interrupted:'herstel na herstart'}[j.quality_status]||j.quality_status);
       if(j.quality_error)quality+='\n'+j.quality_error;
-      if(j.quality_report){try{const report=JSON.parse(j.quality_report);quality+='\nTranscript: '+report.transcript+'\nAandachtspunten: '+JSON.stringify(report.findings)+'\n'+report.message}catch(e){quality+='\nRapport niet leesbaar'}}
+      if(j.quality_report)quality+=' — open Kwaliteitsrapporten voor de bevindingen.'
     }
     card.querySelector('.quality').textContent=quality;
-    const cancel=card.querySelector('.cancel-quality');cancel.hidden=j.quality_status!=='queued';cancel.onclick=async()=>{try{await api('/api/quality/'+encodeURIComponent(j.quality_id)+'/cancel',{method:'POST'});refresh()}catch(e){msg(e)}};
+    const cancel=card.querySelector('.cancel-quality');cancel.hidden=!['queued','running'].includes(j.quality_status);cancel.onclick=async()=>{try{await api('/api/quality/'+encodeURIComponent(j.quality_id)+'/cancel',{method:'POST'});refresh()}catch(e){msg(e)}};
     card.querySelector('.delete').hidden=['queued','running'].includes(j.status);
+    card.querySelector('.quality-controls').hidden=j.status!=='done';
+    card.querySelector('.quality-start').hidden=j.status!=='done';
+    card.querySelector('.quality-start').disabled=['queued','running','interrupted'].includes(j.quality_status);
+    card.querySelector('.quality-history').hidden=j.status!=='done';
     const area=card.querySelector('.job-audio');
     if(j.status==='done'&&!area.querySelector('audio')){
       const audio=document.createElement('audio');audio.controls=true;audio.preload='none';audio.src='/api/jobs/'+encodeURIComponent(id)+'/audio';
       const download=document.createElement('a');download.className='download';download.href=audio.src+'?download=1';download.textContent='WAV downloaden';area.append(audio,download);
     }
   }
+}
+async function showReports(card,id){
+  try{
+    const reports=await api('/api/jobs/'+encodeURIComponent(id)+'/quality');
+    const target=card.querySelector('.quality-reports');target.replaceChildren();
+    if(!reports.length){target.textContent='Nog geen kwaliteitsrapporten.';return}
+    const names={possible_repetition:'Mogelijke herhaling',possibly_missing:'Mogelijk ontbrekende woorden',unexpected_words:'Onverwachte woorden',possible_substitution:'Onzeker verschil',uncertain:'Onzekere herkenning',near_silence:'Technische waarschuwing'};
+    for(const item of reports){
+      const box=document.createElement('section');box.className='quality-report';
+      const title=document.createElement('h4');title.textContent=item.created_at+' · '+item.model+' · '+item.status;box.append(title);
+      if(item.error){const error=document.createElement('p');error.textContent=item.error;box.append(error)}
+      if(item.report){try{
+        const report=JSON.parse(item.report);
+        for(const [label,value] of [['Verwachte uitgesproken tekst',report.expected],['Herkend transcript',report.transcript]]){const p=document.createElement('p');p.textContent=label+': '+(value||'niet beschikbaar');box.append(p)}
+        const caution=document.createElement('p');caution.textContent='Whisper kan fouten missen of zelf verkeerd herkennen. Beluister de opname altijd.';box.append(caution);
+        const list=document.createElement('ul');
+        for(const f of report.findings||[]){const li=document.createElement('li');li.textContent=(names[f.type]||'Aandachtspunt')+': '+(f.message||('verwacht: '+(f.expected||[]).join(' ')+'; herkend: '+(f.heard||[]).join(' ')));
+          if(f.time_range){const t=f.time_range;const jump=document.createElement('button');jump.type='button';jump.textContent='Ga naar ongeveer '+(t.start_ms/1000).toFixed(1)+'–'+(t.end_ms/1000).toFixed(1)+' s';jump.onclick=()=>{const audio=card.querySelector('audio');if(audio){audio.currentTime=t.start_ms/1000;audio.focus()}};li.append(' ',jump)}list.append(li)}
+        if(!list.children.length){const li=document.createElement('li');li.textContent='Geen tekstverschillen gevonden; dit bewijst geen foutloze opname.';list.append(li)}box.append(list);
+      }catch(e){const p=document.createElement('p');p.textContent='Rapport niet leesbaar';box.append(p)}}
+      target.append(box);
+    }
+  }catch(e){msg(e)}
 }
 let refreshRunning=false, refreshPending=false, refreshVersion=0;
 async function refresh(poll=false){

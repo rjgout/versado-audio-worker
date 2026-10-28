@@ -25,3 +25,12 @@ def test_wav_silence_and_invalid():
     result=inspect_wav(output.getvalue())
     assert result['near_silence'] and result['duration_seconds']==1
     with pytest.raises(ValueError): inspect_wav(b'invalid')
+
+
+def test_time_ranges_are_coarse_not_word_precision():
+    from app.quality import attach_time_ranges
+    report=compare('Neefi ging verder', 'Neefi ging ging verder')
+    segments=[{'text':'Neefi ging','start_ms':0,'end_ms':2000}, {'text':'ging verder','start_ms':2000,'end_ms':4800}]
+    finding=attach_time_ranges(report['findings'], segments)[0]
+    assert finding['time_range']['approximate'] is True
+    assert finding['time_range']['start_ms'] in (0,2000)

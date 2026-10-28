@@ -15,7 +15,7 @@ try:
                 break
         except OSError: time.sleep(.5)
     else: raise RuntimeError('Whisper-service startte niet')
-    request=urllib.request.Request('http://127.0.0.1:19090/transcribe?model=base&language=nl',data=b'no model',method='POST')
+    request=urllib.request.Request('http://127.0.0.1:19090/transcribe?model=base&language=nl&task=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',data=b'no model',method='POST')
     try: urllib.request.urlopen(request,timeout=10)
     except urllib.error.HTTPError as e:
         assert e.code==422 and 'ontbreekt' in json.load(e)['error']

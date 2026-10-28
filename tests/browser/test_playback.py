@@ -40,6 +40,8 @@ def test_playback_survives_polling():
                 elif path.endswith('/api/jobs') and route.request.method == 'POST':
                     sent['job'] = route.request.post_data_json; result = {'id':'new'}
                 elif path.endswith('/api/jobs'): result = state['jobs']
+                elif path.endswith('/api/jobs/one/quality') and route.request.method == 'POST': sent['quality']=route.request.post_data_json; result={'id':'q'}
+                elif path.endswith('/api/jobs/one/quality'): result=[{'model':'base','status':'done','created_at':'nu','report':json.dumps({'expected':'Hallo','transcript':'Hallo hallo','findings':[{'type':'possible_repetition','expected':[],'heard':['hallo'],'time_range':{'start_ms':1000,'end_ms':2000}}]})}]
                 elif path.endswith('/api/rules'): result = rules
                 elif path.endswith('/api/previews') and route.request.method == 'POST':
                     sent['preview'] = route.request.post_data_json; result = {'id': 'preview'}
@@ -84,6 +86,15 @@ def test_playback_survives_polling():
             assert abs(player.evaluate('(a) => a.currentTime') - paused) < .3
             player.evaluate('(a) => { a.currentTime = 4; a.play() }')
             page.wait_for_function('document.querySelector("[data-job-id=one] audio").currentTime > 5')
+            card.locator('.quality-model').select_option('base')
+            card.locator('.quality-start').click()
+            page.wait_for_timeout(200)
+            assert sent['quality']=={'model':'base'}
+            card.locator('.quality-history').click()
+            card.locator('.quality-reports li').first.wait_for()
+            assert 'Mogelijke herhaling' in card.locator('.quality-reports').inner_text()
+            card.locator('.quality-reports button').click()
+            assert player.evaluate('(a) => a === window.originalAudio && Math.abs(a.currentTime-1) < 1')
             page.locator('[data-tab="dictionary"]').click()
             page.locator('[data-rule-id="1"] .play').click()
             preview = page.locator('[data-rule-id="1"] audio')

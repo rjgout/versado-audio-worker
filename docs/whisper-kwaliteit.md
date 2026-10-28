@@ -1,35 +1,53 @@
-# Whisper-kwaliteitscontrole — werk in uitvoering
+# Lokale Whisper-kwaliteitscontrole
 
-Deze branch is een eerste fase en is **niet gereed voor NAS-deployment**. De controle vergelijkt de voorbereide TTS-tekst met een lokaal Whisper-transcript en meldt mogelijke toevoegingen, herhalingen en ontbrekende of andere woorden. Zij geeft altijd `manual_review`, ook bij een overeenkomst. Stotteringen kunnen onopgemerkt blijven en herkenningsfouten kunnen vals alarm geven. Het WAV-onderzoek controleert formaat, duur en vrijwel volledige stilte; er is nog geen betrouwbare detectie van lettergrepen, lange stiltes, afgebroken einden, volgorde of onwaarschijnlijke duur.
+Deze draft ondersteunt een optionele lokale controle van nieuwe én bestaande opnamen. De controle vergelijkt Whisper primair met de daadwerkelijk uitgesproken TTS-tekst. Een rapport bevat transcript, mogelijke herhalingen, ontbrekende of afwijkende woorden, technische waarschuwingen en waar beschikbaar een **indicatief** tijdvak van een Whisper-segment. Een overeenkomst bewijst geen foutloze opname; Whisper kan stotteringen missen of zelf fouten maken. Luister altijd zelf.
 
-De service bouwt whisper.cpp commit `a8d002cfd879315632a579e73f0148d06959de36` (v1.7.6) zonder native optimalisatie en met AVX, AVX2, AVX512, FMA, F16C en BMI2 expliciet uitgeschakeld. De J4125 is hiermee nog niet getest. De service draait met UID 10001, accepteert maximaal één analyse tegelijk, gebruikt standaard twee threads en publiceert geen hostpoort. De app verwerkt generatie en controle na elkaar in één worker. Een gedeeld bestandslot in de pronunciation-map zorgt dat een Whisper-proces dat na een app-herstart doorloopt geen nieuwe generatie overlapt. Het stoppen van een al actieve analyse is nog niet geïmplementeerd en herstartgedrag met echte engines moet nog worden bevestigd. De gezondheidscontrole betekent alleen dat de service bereikbaar is, niet dat een model beschikbaar is.
+## Status en beperkingen
 
-De Compose-service heeft profiel `quality`, een interne poort, een alleen-lezen modelbindmount en instelbare `WHISPER_THREADS` (1–4), `WHISPER_TIMEOUT` en `WHISPER_MEMORY`. Deze service moet handmatig worden gebouwd uit de repository; een Portainer-stack met alleen de editor heeft geen buildcontext. De app blijft bruikbaar zonder deze service zolang de kwaliteitscontrole niet wordt gekozen. Er is nog geen goedgekeurde privé-image of uitgewerkte Portainer-updateprocedure.
+De implementatie moet nog op de Synology en met echte Nederlandse M5-opnamen worden gecontroleerd. Het meertalige tiny-model en een Engelstalig upstream-fragment zijn lokaal met de echte binary getest; dat is geen Nederlandse kwaliteitsmeting en bewijst geen J4125-compatibiliteit. Detectie van afzonderlijke lettergreepstotteringen, lange stiltes, afgebroken begin en einde, en betrouwbare duurafwijkingen is niet compleet. Een lopende analyse kan worden gestopt; bij herstart wordt een actieve taak als onderbroken geregistreerd en wordt de service verzocht deze te beëindigen. Een gedeeld bestandslot beschermt het zware werk, maar controleer dit met echte engines op de NAS. Automatische hergeneratie en fragmentversies zijn bewust niet onderdeel van deze fase.
 
-## Modellen
+## Images en Portainer
 
-Gebruik de meertalige ggml-modellen van `ggerganov/whisper.cpp` op Hugging Face, niet `.en`-modellen. Download ze uitsluitend handmatig naar `/volume1/docker/versado-audio-worker/whisper-models/`, controleer SHA-256 en geef UID 10001 leesrechten. De service verifieert bij ieder verzoek de volgende hashes:
+Na een gecontroleerde merge naar main bouwt CI de app en de aparte `ghcr.io/rjgout/versado-audio-worker-whisper`-image, test ze en publiceert `latest` en `sha-<volledige commit>`. Een draft-PR publiceert niets. Controleer in GitHub Packages dat **beide** packages privé zijn en toegang geven aan de repository. Bij de eerste publicatie moet de eigenaar de packagezichtbaarheid zelf controleren: een workflow kan een eerder openbaar gemaakt package niet veilig privé veronderstellen.
 
-| Model | Bestand | SHA-256 |
-|---|---|---|
-| tiny | ggml-tiny.bin | be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21 |
-| base | ggml-base.bin | 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe |
-| small | ggml-small.bin | 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b |
+1. Maak een consistente back-up zoals hieronder beschreven. Verwijder geen bestaande map of opname.
+2. Voeg in Portainer bij Registries `ghcr.io` toe met GitHub-gebruikersnaam en een classic token met `read:packages` en toegang tot beide private packages. Bewaar het token uitsluitend in Portainer. Configureer de toegang tot private packages en eventuele SSO-autorisatie op GitHub.
+3. Voeg de modelmap toe en installeer het meertalige base-model zoals hieronder. Maak ook voldoende tijdelijke schijfruimte beschikbaar voor een WAV-conversie.
+4. Gebruik de `compose.yaml` uit deze repository als Portainer Git-stack of plak de volledige inhoud in de stack-editor. De Compose bevat alleen image-referenties en heeft geen NAS-buildcontext nodig. Behoud de huidige `SECRET_KEY`, `PASSWORD_HASH`, overige environmentwaarden, volumes en NAS-poort 5006. Voeg desgewenst `WHISPER_THREADS=2`, `WHISPER_TIMEOUT=7200`, `WHISPER_MEMORY=3g` en `WHISPER_IMAGE_TAG=sha-<volledige-commit>` toe. `IMAGE_TAG` selecteert de app-image. Voor een gecontroleerde update gebruik dezelfde geteste commit voor beide tags. Er zijn geen CPU CFS-quota en er wordt geen Whisper-hostpoort gepubliceerd.
+5. Update de bestaande stack handmatig met de private registry. Start de service en controleer logs en de knop **Controleer beschikbaarheid** in Voice Lab. Deze toont afzonderlijk servicebereikbaarheid, binary, model, checksum en gereedheid. De gewone generatie werkt ook zonder een beschikbare Whisper-service, mits de controle uit staat.
+6. Bij een bestaande voltooide opname: kies een model, selecteer **Controleer audiokwaliteit** en open **Kwaliteitsrapporten**. Bestaande WAV-bestanden worden niet gewijzigd. Rapporten blijven in de database. Een lopende of wachtende controle kan worden gestopt via de opnamegegevens; controleer dat de status verandert en de originele audio afspeelbaar blijft.
 
-Bron: `https://huggingface.co/ggerganov/whisper.cpp/tree/main`. Controleer de upstream-herkomst en hash met `sha256sum`; geen model wordt automatisch gedownload. Start bij een echte evaluatie met base en vergelijk eventueel tiny en small op snelheid en kwaliteit.
+De app en Whisper mounten dezelfde `pronunciation`-map voor het werklot. Geef UID/GID 10001 lees- en schrijfrechten op die map en op `tests`; geef UID 10001 lees- en traverseerrechten op de modelmap. Gebruik niet meerdere app-instanties. `WHISPER_THREADS` is begrensd op 1–4. De app-worker en service gebruiken dezelfde lock; afhankelijk van de concrete engine kan deze na een app-crash nog werk afmaken. Test dat scenario voordat dit dagelijks wordt gebruikt.
 
-## Persistente gegevens en rollback
+## Base-model installeren
 
-Schemaversie 3 voegt een nullable modelkolom en de tabel `quality_tasks` toe; bestaande opnamen en uitspraakregels worden niet aangepast. Taken die tijdens een herstart actief waren krijgen de status mislukt. Wachtende taken blijven bewaard; de originele WAV blijft behouden als controle mislukt. Maak vóór iedere test een consistente back-up van de SQLite-database **en** de map `tests`, bijvoorbeeld door eerst de stack te stoppen en beide mappen inclusief WAL-bestanden te kopiëren. Voor terugrollen: stop de stack, herstel beide samen uit dezelfde back-up en start de vorige image. Test deze procedure eerst buiten productie.
+Op de NAS in een vertrouwde shell, als een gebruiker met rechten op de map:
 
-## Nog te bouwen
+```sh
+mkdir -p /volume1/docker/versado-audio-worker/whisper-models
+cd /volume1/docker/versado-audio-worker/whisper-models
+# Stop als het doel al bestaat: controleer en hergebruik het in plaats van overschrijven.
+test ! -e ggml-base.bin || { echo 'Model bestaat al; controleer de checksum.'; exit 1; }
+curl -fL -o ggml-base.bin.part https://huggingface.co/ggerganov/whisper.cpp/resolve/80da2d8bfee42b0e836fc3a9890373e5defc00a6/ggml-base.bin
+printf '%s  %s\n' '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe' 'ggml-base.bin.part' | sha256sum -c - && mv -n ggml-base.bin.part ggml-base.bin
+```
 
-Stabiele fragmenten, kandidaten, gerichte hergeneratie en veilige audioversies ontbreken. Automatisch verbeteren is niet beschikbaar. Het stoppen van reeds gestarte analyses en veilige afstemming bij herstart zijn niet klaar. Er is geen precieze tijdcode voor bevindingen, er zijn nog geen kwaliteitscontroles van daadwerkelijk opgenomen M5-spraak, geen J4125-test en geen betrouwbaar gemeten fout- of duurgrenzen. De UI biedt nog geen volledig beoordelingsscherm of handmatige controle van eerdere opnamen. De implementatie mag niet als volledig of productierijp worden beschouwd.
+Controleer de uitvoer van `sha256sum -c` voordat u `mv` uitvoert; voer na een fout de laatste regel niet uit. Zorg dat UID 10001 de map kan doorlopen en het model lezen. Herstart Whisper indien nodig en controleer de beschikbaarheid in de app.
 
-## NAS-acceptatie na afronding
+Overige meertalige modellen van dezelfde bron: `ggml-tiny.bin`, SHA-256 `be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21`; `ggml-small.bin`, SHA-256 `1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b`. Gebruik geen `.en`-modellen. De service controleert voor iedere analyse de checksum; er is geen download bij containerstart.
 
-Maak een back-up; installeer en controleer model en rechten. Meet per model tiny/base/small op goede en bekende stotterende M5-opnamen: herkende en gemiste herhalingen, vals alarm, tijd, CPU en RAM. Vergelijk herkenning met zowel de originele als de werkelijk uitgesproken tekst. Beoordeel iedere WAV zelf; een match bewijst geen prettige spraak. Test herstart en terugzetten van database én audio en controleer dat geen oude bestanden worden overschreven. Resultaten zijn nog niet beschikbaar.
+## Back-up, update en terugrollen
 
-## Uitgevoerde lokale proef
+Stop de stack voordat u een consistente back-up van zowel `pronunciation` (inclusief SQLite en WAL-bestanden) als `tests` maakt. Bewaar de huidige Compose en beide image-SHA-tags. Maak tijdens het terugrollen geen mix van database en audiobestanden uit verschillende back-ups: stop de stack, herstel beide mappen uit hetzelfde back-upmoment, kies beide eerdere SHA-tags en start de oude stack. De nieuwe schemaversie voegt een tabel en kolom toe; wijzigingen ná de back-up gaan bij volledige terugzet verloren. Test de herstelprocedure eerst op een aparte kopie. Verwijder nooit modelmappen als onderdeel van rollback.
 
-In de ontwikkelomgeving is de vastgepinde bron lokaal uitgecheckt en met dezelfde CMake-vlaggen in een container gebouwd; dit gebruikte een lokale buildcontext omdat de Docker-buildomgeving het GitHub-certificaat niet vertrouwde. Het meertalige tiny-model is handmatig gedownload en de bovenstaande SHA-256 is bevestigd. De service transcribeerde de meegeleverde Engelstalige `samples/jfk.wav` met de echte Whisper-binary. Dit controleert de technische aanroep, niet de Nederlandse herkenningskwaliteit of compatibiliteit met de J4125. De reguliere Dockerfile en de CI-build moeten afzonderlijk worden bevestigd.
+## Reproduceerbare NAS-evaluatie
+
+1. Maak kopieën van ten minste enkele goede en hoorbaar stotterende M5-opnamen van dezelfde tekst. Noteer per opname onafhankelijk van Whisper de bekende stotteringen en tijdvakken na handmatig luisteren.
+2. Analyseer elk bestand met base; herhaal met tiny en small als geheugen en tijd dat toelaten. Noteer de exacte app- en Whisper-image-SHA, modelhash, voorleesinstellingen en tijdstip van start en voltooiing.
+3. Leg per opname en model vast: bekende stotteringen, door Whisper gemelde stotteringen, gemiste stotteringen, onterechte meldingen, duur en onbesliste gevallen. Beoordeel de rapporten tegen de voorbereide uitspraaktekst en beluister elk indicatief tijdvak.
+4. Meet CPU en RAM tijdens de hele analyse met herhaalde `docker stats --no-stream`-metingen of de Portainer-statistieken; noteer de hoogste **waargenomen** waarden en het meetinterval. Een gemeten piek tussen samples kan hoger zijn. Test ook stoppen en herstart midden in een analyse en controleer dat originele WAV en rapportgeschiedenis intact blijven.
+5. Vergelijk pas na deze metingen de modellen en beslis of fragmentgerichte hergeneratie nuttig is. Geen score of succesvolle NAS-test is hier vooraf ingevuld.
+
+## Herkomst en toekomstige koppeling
+
+De Whisper-image gebruikt whisper.cpp v1.7.6 commit `a8d002cfd879315632a579e73f0148d06959de36` met native optimalisatie, AVX, AVX2, AVX512, FMA, F16C en BMI2 expliciet uitgeschakeld. In de gecontroleerde bouw moet de J4125 nog worden getest. Zie [versado-app-contract.md](versado-app-contract.md) voor de toekomstige scheiding tussen tekstbron, audioproductie en publicatie. Er wordt geen Versado.app-database of -opslag aangeraakt. Bevindingen met indicatieve tijdvakken kunnen later aan stabiele fragment-ID's en versies worden gekoppeld; de huidige interne Whisper-fragmenten zijn geen vervangbare audiobestanden.

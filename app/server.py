@@ -19,7 +19,7 @@ import requests
 from werkzeug.security import check_password_hash
 from app.engines import VOICES, synthesize, validate_settings, stored_settings
 from app.pronunciation import Rule, prepare
-from app.quality import compare, inspect_wav
+from app.quality import compare, inspect_wav, attach_time_ranges
 
 DATA = Path(os.getenv('DATA_DIR', '/data/pronunciation'))
 AUDIO = Path(os.getenv('AUDIO_DIR', '/data/tests'))
@@ -58,7 +58,7 @@ def init():
             model TEXT NOT NULL, status TEXT NOT NULL, report TEXT, error TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
         c.execute('UPDATE schema_version SET version=3 WHERE version < 3')
-        c.execute("UPDATE quality_tasks SET status='failed',error='Controle onderbroken door herstart.' WHERE status='running'")
+        c.execute("UPDATE quality_tasks SET status='interrupted',error='Controle onderbroken; beëindiging wordt bevestigd.' WHERE status='running'")
         if not c.execute('SELECT 1 FROM rules WHERE id=1').fetchone():
             c.execute("INSERT INTO rules(id,language,source,original,replacement,status,version) VALUES(1,'nl','bofm','Nephi','Nefi','approved',1)")
             history(c, 1)
@@ -295,6 +295,18 @@ def cleanup_previews():
             if row['audio']: (AUDIO / row['audio']).unlink(missing_ok=True)
             c.execute('DELETE FROM jobs WHERE id=?', (row['id'],))
 
+@app.get('/api/quality/health')
+@protected
+def quality_health():
+    model=request.args.get('model','base')
+    if model not in ('tiny','base','small'): abort(400)
+    try:
+        result=requests.get(os.getenv('WHISPER_URL','http://whisper:8090')+'/health',params={'model':model},timeout=(2,30))
+        result.raise_for_status()
+        return {'reachable':True,**result.json()}
+    except (requests.RequestException,ValueError):
+        return {'reachable':False,'ready':False,'error':'Whisper-service niet bereikbaar'}
+
 @app.route('/api/jobs/<jid>/quality', methods=['GET','POST'])
 @protected
 def quality_tasks(jid):
@@ -307,8 +319,8 @@ def quality_tasks(jid):
         model=payload().get('model','base')
         if model not in ('tiny','base','small'): abort(400, 'Onbekend Whisper-model')
         c.execute('BEGIN IMMEDIATE')
-        if c.execute("SELECT count(*) FROM quality_tasks WHERE status IN ('queued','running')").fetchone()[0]>=25: abort(429, 'Wachtrij is vol')
-        if c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running')",(jid,)).fetchone(): abort(409, 'Controle loopt al')
+        if c.execute("SELECT count(*) FROM quality_tasks WHERE status IN ('queued','running','interrupted')").fetchone()[0]>=25: abort(429, 'Wachtrij is vol')
+        if c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running','interrupted')",(jid,)).fetchone(): abort(409, 'Controle loopt al')
         qid=uuid.uuid4().hex
         c.execute("INSERT INTO quality_tasks(id,job_id,model,status) VALUES(?,?,?,'queued')",(qid,jid,model))
         return {'id':qid},202
@@ -317,8 +329,21 @@ def quality_tasks(jid):
 @protected
 def cancel_quality(qid):
     with db() as c:
-        changed=c.execute("UPDATE quality_tasks SET status='cancelled' WHERE id=? AND status='queued'",(qid,)).rowcount
-        if not changed: abort(409, 'Alleen controles in de wachtrij kunnen worden gestopt')
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute('SELECT status FROM quality_tasks WHERE id=?',(qid,)).fetchone()
+        if not row: abort(404)
+        if row['status']=='queued':
+            c.execute("UPDATE quality_tasks SET status='cancelled' WHERE id=? AND status='queued'",(qid,))
+            return {'ok':True}
+        if row['status']!='running': abort(409, 'Controle is al afgerond')
+    try:
+        response=requests.post(os.getenv('WHISPER_URL','http://whisper:8090')+'/cancel',params={'task':qid},timeout=(2,5))
+        response.raise_for_status()
+    except requests.RequestException:
+        abort(503, 'De Whisper-service bevestigde het stoppen niet')
+    with db() as c:
+        changed=c.execute("UPDATE quality_tasks SET status='cancelled' WHERE id=? AND status='running'",(qid,)).rowcount
+        if not changed: abort(409, 'Controle is inmiddels afgerond')
     return {'ok':True}
 
 
@@ -326,10 +351,16 @@ def run_quality(task):
     with db() as c:
         job=c.execute('SELECT * FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
     if not job or not job['audio']: raise ValueError('Audiobestand ontbreekt')
-    data=(AUDIO/job['audio']).read_bytes()
-    if len(data)>100*1024*1024: raise ValueError('Audiobestand te groot')
-    audio_stats=inspect_wav(data)
-    response=requests.post(os.getenv('WHISPER_URL','http://whisper:8090')+'/transcribe',params={'model':task['model'],'language':job['language'].split('-')[0]},data=data,headers={'Content-Type':'audio/wav'},timeout=(5, min(28800,max(60,int(os.getenv('WHISPER_TIMEOUT','7200'))))))
+    path=AUDIO/job['audio']
+    if path.stat().st_size>100*1024*1024: raise ValueError('Audiobestand te groot')
+    audio_stats=inspect_wav(path)
+    try:
+        with path.open('rb') as data:
+            response=requests.post(os.getenv('WHISPER_URL','http://whisper:8090')+'/transcribe',params={'model':task['model'],'language':job['language'].split('-')[0],'task':task['id']},data=data,headers={'Content-Type':'audio/wav'},timeout=(5, min(28800,max(60,int(os.getenv('WHISPER_TIMEOUT','7200'))))))
+    except requests.RequestException:
+        try: requests.post(os.getenv('WHISPER_URL','http://whisper:8090')+'/cancel',params={'task':task['id']},timeout=(2,5))
+        except requests.RequestException: pass
+        raise
     try:
         response.raise_for_status()
     except requests.HTTPError as e:
@@ -339,7 +370,8 @@ def run_quality(task):
     result=response.json()
     if not isinstance(result.get('text'),str): raise ValueError('Ongeldig Whisper-antwoord')
     report=compare(job['spoken'], result['text'])
-    report.update({'transcript':result['text'],'audio':audio_stats,'engine':result})
+    attach_time_ranges(report['findings'],result.get('segments',[]))
+    report.update({'transcript':result['text'],'expected':job['spoken'],'audio':audio_stats,'engine':result})
     if audio_stats['near_silence']: report['findings'].append({'type':'near_silence','message':'De opname bevat vrijwel uitsluitend stilte.'})
     return report
 
@@ -352,7 +384,7 @@ def job_update(jid):
         if request.method == 'PATCH':
             c.execute('UPDATE jobs SET label=? WHERE id=?',(bounded(payload().get('label',''),'label',200,False),jid))
         else:
-            if row['status'] in ('queued','running') or c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running')",(jid,)).fetchone(): abort(409)
+            if row['status'] in ('queued','running') or c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running','interrupted')",(jid,)).fetchone(): abort(409)
             c.execute('DELETE FROM jobs WHERE id=?',(jid,))
             if row['audio']: (AUDIO / row['audio']).unlink(missing_ok=True)
     return {'ok':True}
@@ -365,9 +397,19 @@ def audio(jid):
     return send_file(AUDIO / row['audio'], mimetype='audio/wav', as_attachment=request.args.get('download') == '1', download_name='versado.wav')
 
 def worker():
+    next_recovery=0
     while True:
         try:
             cleanup_previews()
+            if time.monotonic() >= next_recovery:
+                next_recovery=time.monotonic()+30
+                with db() as c: interrupted=c.execute("SELECT id FROM quality_tasks WHERE status='interrupted'").fetchall()
+                for item in interrupted:
+                    try:
+                        response=requests.post(os.getenv('WHISPER_URL','http://whisper:8090')+'/cancel',params={'task':item['id']},timeout=(2,5))
+                        response.raise_for_status()
+                        with db() as c: c.execute("UPDATE quality_tasks SET status='failed',error='Controle onderbroken door herstart.' WHERE id=? AND status='interrupted'",(item['id'],))
+                    except requests.RequestException: break
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
                 row=c.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY rowid LIMIT 1").fetchone()
@@ -379,9 +421,10 @@ def worker():
             if task:
                 try:
                     report=run_quality(task)
-                    with db() as c: c.execute("UPDATE quality_tasks SET status='done',report=? WHERE id=?",(json.dumps(report,ensure_ascii=False),task['id']))
+                    with db() as c: c.execute("UPDATE quality_tasks SET status='done',report=? WHERE id=? AND status='running'",(json.dumps(report,ensure_ascii=False),task['id']))
                 except Exception as e:
-                    with db() as c: c.execute("UPDATE quality_tasks SET status='failed',error=? WHERE id=?",(str(e)[:500],task['id']))
+                    status='interrupted' if isinstance(e, requests.RequestException) else 'failed'
+                    with db() as c: c.execute("UPDATE quality_tasks SET status=?,error=? WHERE id=? AND status='running'",(status,str(e)[:500],task['id']))
                 continue
             if not row:
                 time.sleep(1); continue

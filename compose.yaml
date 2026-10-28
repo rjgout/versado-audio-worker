@@ -37,10 +37,7 @@ services:
     mem_limit: ${SUPERTONIC_MEMORY:-4g}
     networks: [internal]
   whisper:
-    profiles: [quality]
-    build:
-      context: .
-      dockerfile: whisper/Dockerfile
+    image: ghcr.io/rjgout/versado-audio-worker-whisper:${WHISPER_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       WHISPER_THREADS: ${WHISPER_THREADS:-2}
