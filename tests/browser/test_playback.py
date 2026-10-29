@@ -37,6 +37,7 @@ def test_playback_survives_polling():
             def routes(route):
                 path = route.request.url.split('?')[0]
                 if path.endswith('/api/session'): result = {'authenticated': True, 'csrf': 'test'}
+                elif path.endswith('/api/piper/health'): result={'ready':True,'reachable':True,'settings_supported':True}
                 elif path.endswith('/api/voice-labels'):
                     if route.request.method=='PUT': sent['labels']=route.request.post_data_json; result={'ok':True}
                     else: result={}
@@ -142,6 +143,7 @@ def test_playback_survives_polling():
             assert page.locator('#speed-value').inner_text() == '100%'
             page.locator('#engine').select_option('piper')
             assert not page.locator('#voice-settings').is_visible()
+            page.wait_for_function("document.querySelector('#piper-health').textContent.includes('bevestigd')")
             page.locator('#collection').select_option('mls')
             page.locator('#voice').select_option('nl_NL-mls-medium#1724')
             page.locator('#favorite').check()

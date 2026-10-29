@@ -493,3 +493,71 @@ def test_filter_keeps_original_and_labels_persist(client,monkeypatch):
     assert (m.AUDIO/'original.wav').read_bytes()==original
     assert c.get('/api/worker/status').json['blocked']
 
+
+
+@pytest.mark.parametrize('reply',['timeout','close','wrong'])
+def test_piper_incompatible_before_synthesis(monkeypatch,reply):
+    import asyncio
+    from app import engines
+    from wyoming.event import Event
+    seen=[]
+    class Client:
+        def __init__(self,*args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def write_event(self,event): seen.append(event.type)
+        async def read_event(self):
+            if reply=='timeout': raise TimeoutError()
+            return None if reply=='close' else Event(type='unexpected')
+    monkeypatch.setattr(engines,'AsyncTcpClient',Client)
+    with pytest.raises(engines.PiperSettingsError,match='Portainer'):
+        engines.synthesize('piper','nl_NL-ronnie-medium','nooit versturen',settings=engines.validate_settings('piper',{}))
+    assert seen==['versado-settings']
+    state=asyncio.run(engines.piper_health())
+    assert state['reachable'] and not state['ready'] and 'rhasspy' in state['error']
+
+
+def test_piper_handshake_failure_does_not_block_supertonic(client,monkeypatch):
+    m,c=client;h=login(c)
+    first=c.post('/api/jobs',json={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'test'},headers=h).json['id']
+    second=c.post('/api/jobs',json={'engine':'supertonic','voice':'M5','source':'bofm','text':'test'},headers=h).json['id']
+    output=io.BytesIO()
+    with wave.open(output,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(22050);w.writeframes(b'\0\0'*20)
+    def synthesize(engine,*args):
+        if engine=='piper': raise m.PiperSettingsError('Portainer: verkeerde Piper-image')
+        return output.getvalue()
+    monkeypatch.setattr(m,'synthesize',synthesize)
+    monkeypatch.setattr(m.time,'sleep',lambda _:(_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    rows={x['id']:x for x in c.get('/api/jobs').json}
+    assert rows[first]['status']=='failed' and 'Portainer' in rows[first]['error']
+    assert rows[second]['status']=='done'
+    assert not c.get('/api/worker/status').json['blocked']
+
+
+def test_piper_health_authorization(client,monkeypatch):
+    m,c=client
+    assert c.get('/api/piper/health').status_code==401
+    login(c)
+    async def healthy(): return {'ready':True,'reachable':True,'settings_supported':True}
+    monkeypatch.setattr(m,'piper_health',healthy)
+    assert c.get('/api/piper/health').json['ready']
+
+
+def test_piper_timeout_after_synthesis_keeps_uncertain_error(monkeypatch):
+    from app import engines
+    from wyoming.event import Event
+    seen=[]
+    settings=engines.validate_settings('piper',{})
+    class Client:
+        def __init__(self,*args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def write_event(self,event): seen.append(event.type)
+        async def read_event(self):
+            if len(seen)==1: return Event(type='versado-settings-ready',data=settings)
+            raise TimeoutError()
+    monkeypatch.setattr(engines,'AsyncTcpClient',Client)
+    with pytest.raises(TimeoutError): engines.synthesize('piper','nl_NL-ronnie-medium','tekst',settings=settings)
+    assert seen==['versado-settings','synthesize']

@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import fcntl
 import re
@@ -17,7 +18,7 @@ from functools import wraps
 from flask import Flask, abort, jsonify, request, send_file, session, render_template
 import requests
 from werkzeug.security import check_password_hash
-from app.engines import VOICES, synthesize, validate_settings, stored_settings
+from app.engines import VOICES, synthesize, validate_settings, stored_settings, PiperSettingsError, piper_health
 from app.pronunciation import Rule, prepare
 from app.quality import compare, inspect_wav, attach_time_ranges
 
@@ -166,6 +167,11 @@ def login():
 def logout():
     session.clear()
     return {'ok':True}
+
+@app.get('/api/piper/health')
+@protected
+def check_piper():
+    return asyncio.run(piper_health())
 
 @app.get('/api/voices')
 @protected
@@ -537,7 +543,11 @@ def worker():
                     if row['quality_model']:
                         c.execute("INSERT INTO quality_tasks(id,job_id,model,status) VALUES(?,?,?,'queued')",(uuid.uuid4().hex,row['id'],row['quality_model']))
             except Exception as e:
-                with db() as c: c.execute("UPDATE jobs SET status='failed',error=? WHERE id=?",(str(e)[:500],row['id']))
+                with db() as c:
+                    if isinstance(e, PiperSettingsError):
+                        # Raised only before a Synthesize request was sent.
+                        c.execute('DELETE FROM heavy_tts_guard WHERE singleton=1 AND job_id=?',(row['id'],))
+                    c.execute("UPDATE jobs SET status='failed',error=? WHERE id=?",(str(e)[:500] or 'Generatie mislukt; controleer de engineverbinding.',row['id']))
         except Exception:
             app.logger.exception('Workerfout')
             time.sleep(3)

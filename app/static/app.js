@@ -33,10 +33,10 @@ $('#reset-settings').addEventListener('click',()=>setProfile('standard'));
 function syncEngineSettings(){$('#voice-settings').hidden=$('#engine').value!=='supertonic';$('#piper-settings').hidden=$('#engine').value!=='piper'}
 function selection(){let engine=$('#engine').value;return {engine,voice:$('#voice').value,source:$('#source').value,language:'nl',settings:engine==='supertonic'?readSettings():piperSettings()}}
 loadSettings();syncEngineSettings();
-async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');try{personalLabels=await api('/api/voice-labels')}catch(e){personalLabels={}};$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();syncEngineSettings();await refresh()}catch(e){msg(e)}}
+async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');try{personalLabels=await api('/api/voice-labels')}catch(e){personalLabels={}};$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();syncEngineSettings();await refresh();if($('#engine').value==='piper')$('#check-piper').click()}catch(e){msg(e)}}
 $('#loginform').onsubmit=async e=>{e.preventDefault();try{csrf=(await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})})).csrf;$('#password').value='';await load()}catch(e){msg(e)}};
 $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};
-$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>{localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);syncFavorite();syncLabels()};$('#source').onchange=()=>renderRules();
+$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings();if($('#engine').value==='piper')$('#check-piper').click()};$('#voice').onchange=()=>{localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);syncFavorite();syncLabels()};$('#source').onchange=()=>renderRules();
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id of ['lab','dictionary'])$('#'+id).hidden=id!==b.dataset.tab});
 $('#check-whisper').onclick=async()=>{
   const out=$('#whisper-health');out.textContent='Beschikbaarheid controleren…';
@@ -214,3 +214,8 @@ try{const s=JSON.parse(localStorage.getItem('piper_settings'));if(s&&Number.isFi
 function syncLabels(){const labels=personalLabels[$('#voice').value]||[];$('#voice-label-options').innerHTML=['Man','Vrouw','Warm','Helder','Diep','Rustig','Favoriet'].map(x=>`<label><input type="checkbox" value="${x}" ${labels.includes(x)?'checked':''}>${x}</label>`).join('')}
 $('#voice-filter').onchange=selectVoices;
 $('#save-voice-labels').onclick=async()=>{try{const voice=$('#voice').value,labels=[...document.querySelectorAll('#voice-label-options input:checked')].map(x=>x.value);await api('/api/voice-labels',{method:'PUT',body:JSON.stringify({voice,labels})});personalLabels[voice]=labels;msg('Persoonlijke stemlabels bewaard.')}catch(e){msg(e)}};
+
+$('#check-piper').onclick=async()=>{
+ const output=$('#piper-health');output.textContent='Piper-adapter controleren…';
+ try{const result=await api('/api/piper/health');output.textContent=result.ready?'Piper bereikbaar; V2-instellingen bevestigd.':result.error}catch(e){output.textContent=e.message}
+};
