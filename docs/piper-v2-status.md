@@ -54,9 +54,9 @@ image-SHA's. Verwijder of verplaats geen modellen of bestaande mappen.
 De repository-Compose gebruikt `NAS_ROOT`, standaard
 `/volume2/docker/versado-audio-worker`. Bestaande /volume1-installaties moeten hun
 bestaande pad als NAS_ROOT houden. Behoud SECRET_KEY, PASSWORD_HASH, COOKIE_SECURE,
-poort 5006, memorylimieten en persoonlijke instellingen. Behoud het bestaande
-Portainer-netwerk audio-internal: pas bij het overnemen van de referentie-Compose
-uitsluitend de netwerkverwijzing aan de bestaande stack aan. Engines krijgen geen
+poort 5006, memorylimieten en persoonlijke instellingen. De Compose gebruikt het bestaande externe netwerk audio-internal. Een andere
+bestaande netwerknaam is instelbaar via AUDIO_NETWORK. Bij een nieuwe installatie
+moet dit bridge-netwerk eerst in Portainer worden aangemaakt. Engines krijgen geen
 hostpoort. Geen CPU CFS-quota.
 
 Piper gebruikt voortaan de private image

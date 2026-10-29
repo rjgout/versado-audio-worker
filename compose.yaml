@@ -49,4 +49,5 @@ services:
     networks: [internal]
 networks:
   internal:
-    driver: bridge
+    name: ${AUDIO_NETWORK:-audio-internal}
+    external: true

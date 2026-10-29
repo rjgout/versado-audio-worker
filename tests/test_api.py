@@ -475,10 +475,21 @@ def test_filter_keeps_original_and_labels_persist(client,monkeypatch):
     monkeypatch.setattr(m.time,'sleep',stop_when_idle)
     with pytest.raises(SystemExit): m.worker()
     jobs={x['id']:x for x in c.get('/api/jobs').json}
-    assert jobs[child]['status']=='done' and jobs[child]['parent_id']==jid
+    assert jobs[child]['status']=='done' and jobs[child]['parent_id']==jid, jobs[child]['error']
     assert json.loads(jobs[child]['settings'])['audio_filter']['name']=='afftdn'
     assert (m.AUDIO/'original.wav').read_bytes()==original
     filtered=c.get('/api/jobs/'+child+'/audio').data
     with wave.open(io.BytesIO(filtered),'rb') as w: assert w.getnframes()==22050
     m.init()
     assert c.get('/api/jobs/'+child+'/audio').data==filtered
+    second=c.post('/api/jobs/'+jid+'/filter',json={'mode':'light'},headers=h).json['id']
+    m.init()  # Queued processing survives restart without touching the WAV.
+    import app.processing
+    def fail(_): raise OSError('opslag niet beschikbaar')
+    monkeypatch.setattr(app.processing,'filter_wav',fail)
+    with pytest.raises(SystemExit): m.worker()
+    jobs={x['id']:x for x in c.get('/api/jobs').json}
+    assert jobs[second]['status']=='failed'
+    assert (m.AUDIO/'original.wav').read_bytes()==original
+    assert c.get('/api/worker/status').json['blocked']
+
