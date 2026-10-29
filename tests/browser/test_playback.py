@@ -40,7 +40,7 @@ def test_playback_survives_polling():
                 elif path.endswith('/api/worker/status'): result = worker
                 elif path.endswith('/api/worker/recover'):
                     sent['recovery'] = route.request.post_data_json; worker['blocked'] = False; result = {'ok':True}
-                elif path.endswith('/api/voices'): result = {'piper': ['ronnie'], 'supertonic': ['M5']}
+                elif path.endswith('/api/voices'): result = {'piper': ['ronnie', 'nl_NL-mls-medium#2450', 'nl_NL-mls-medium#1724'], 'supertonic': ['M5']}
                 elif path.endswith('/api/jobs') and route.request.method == 'POST':
                     sent['job'] = route.request.post_data_json; result = {'id':'new'}
                 elif path.endswith('/api/jobs'): result = state['jobs']
@@ -139,6 +139,17 @@ def test_playback_survives_polling():
             assert page.locator('#speed-value').inner_text() == '100%'
             page.locator('#engine').select_option('piper')
             assert not page.locator('#voice-settings').is_visible()
+            page.locator('#collection').select_option('mls')
+            page.locator('#voice').select_option('nl_NL-mls-medium#1724')
+            page.locator('#favorite').check()
+            page.locator('#generate button[type=submit], #generate button:not([type])').last.click()
+            page.wait_for_timeout(200)
+            assert sent['job']['voice']=='nl_NL-mls-medium#1724'
+            page.reload()
+            page.wait_for_selector('#workspace:not([hidden])')
+            assert page.locator('#collection').input_value()=='mls'
+            assert page.locator('#voice').input_value()=='nl_NL-mls-medium#1724'
+            assert page.locator('#favorite').is_checked()
             browser.close()
     finally:
         server.shutdown()

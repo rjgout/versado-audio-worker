@@ -40,7 +40,8 @@ def stored_settings(engine, settings):
     return validate_settings(engine, settings)
 
 def synthesize(engine, voice, text, language='nl', settings=None):
-    if voice not in VOICES.get(engine, []):
+    base_voice, separator, speaker = voice.partition('#')
+    if base_voice not in VOICES.get(engine, []) or (separator and (engine != 'piper' or base_voice != 'nl_NL-mls-medium' or not speaker.isdecimal())):
         raise ValueError('Onbekend model of stem')
     if engine == 'supertonic':
         import os
@@ -48,14 +49,14 @@ def synthesize(engine, voice, text, language='nl', settings=None):
         response = requests.post(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/tts', json={'text': text, 'voice': voice, 'lang': language.split('-')[0], **options}, timeout=(10, 1800))
         response.raise_for_status()
         return response.content
-    return asyncio.run(_piper(voice, text))
+    return asyncio.run(_piper(base_voice, text, speaker if separator else None))
 
-async def _piper(voice, text):
+async def _piper(voice, text, speaker=None):
     import os
     async def run():
         client = AsyncTcpClient(os.getenv('PIPER_HOST', 'piper'), int(os.getenv('PIPER_PORT', '10200')))
         async with client:
-            await client.write_event(Synthesize(text=text, voice=SynthesizeVoice(name=voice)).event())
+            await client.write_event(Synthesize(text=text, voice=SynthesizeVoice(name=voice, speaker=speaker)).event())
             fmt = None
             chunks = []
             total = 0

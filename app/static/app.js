@@ -3,7 +3,18 @@ const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...(opts.body?{'Content-Type':'application/json'}:{}),'X-CSRF-Token':csrf,...opts.headers}});if(!r.ok)throw Error((await r.text()).replace(/<[^>]*>/g,' ').trim().slice(0,220));return r.json()}
 function msg(e){$('#message').textContent=e instanceof Error?e.message:e}
-function selectVoices(){let e=$('#engine').value;$('#voice').innerHTML=voices[e].map(v=>`<option>${esc(v)}</option>`).join('');let saved=localStorage.getItem('voice_'+e);if(voices[e].includes(saved))$('#voice').value=saved}
+function syncFavorite(){let key='favorite_'+$('#engine').value+'_'+$('#voice').value;$('#favorite').checked=localStorage.getItem(key)==='1'}
+function selectVoices(){
+  let e=$('#engine').value, collection=$('#collection').value;
+  $('#collection-control').hidden=e!=='piper';
+  const options=(voices[e]||[]).filter(v=>e!=='piper'||(collection==='mls'?v.startsWith('nl_NL-mls-medium#'):!v.includes('#')));
+  $('#voice').innerHTML=options.map(v=>`<option value="${esc(v)}">${esc(v.includes('#')?'MLS spreker '+v.split('#')[1]:v)}</option>`).join('');
+  let saved=localStorage.getItem('voice_'+e);if(options.includes(saved))$('#voice').value=saved;
+  syncFavorite();
+}
+$('#collection').onchange=()=>{localStorage.setItem('piper_collection',$('#collection').value);selectVoices()};
+$('#favorite').onchange=()=>localStorage.setItem('favorite_'+$('#engine').value+'_'+$('#voice').value,$('#favorite').checked?'1':'0');
+$('#collection').value=localStorage.getItem('piper_collection')==='mls'?'mls':'individual';
 const profiles={standard:{speed:100,steps:12,silence:300},scripture:{speed:90,steps:12,silence:350},extra:{speed:85,steps:12,silence:450}};
 function readSettings(){return {speed:Number($('#speed').value)/100,steps:Number($('#steps').value),silence_duration:Number($('#silence').value)/1000}}
 function settingsChanged(custom=true){
@@ -25,7 +36,7 @@ loadSettings();syncEngineSettings();
 async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();syncEngineSettings();await refresh()}catch(e){msg(e)}}
 $('#loginform').onsubmit=async e=>{e.preventDefault();try{csrf=(await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})})).csrf;$('#password').value='';await load()}catch(e){msg(e)}};
 $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};
-$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);$('#source').onchange=()=>renderRules();
+$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>{localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);syncFavorite()};$('#source').onchange=()=>renderRules();
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id of ['lab','dictionary'])$('#'+id).hidden=id!==b.dataset.tab});
 $('#check-whisper').onclick=async()=>{
   const out=$('#whisper-health');out.textContent='Beschikbaarheid controleren…';

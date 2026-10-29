@@ -29,9 +29,9 @@ def prepare(text: str, rules: list[Rule], language: str, source: str, engine: st
         raise ValueError('unsupported language')
     eligible = [r for r in rules if r.status == 'approved' and r.language == language
                 and r.source == source and (r.engine is None or r.engine == engine)
-                and (r.voice is None or (r.engine == engine and r.voice == voice))
+                and (r.voice is None or (r.engine == engine and (r.voice == voice or (engine == 'piper' and '#' in voice and r.voice == voice.split('#', 1)[0]))))
                 and r.original and r.replacement]
-    eligible.sort(key=lambda r: (-(bool(r.voice) * 2 + bool(r.engine)), -r.version, r.id))
+    eligible.sort(key=lambda r: (-(bool(r.voice) * 2 + bool(r.engine) + (r.voice == voice and '#' in voice)), -r.version, r.id))
     selected = {}
     for rule in eligible:
         selected.setdefault(unicodedata.normalize('NFC', rule.original).casefold(), rule)
