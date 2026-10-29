@@ -1,4 +1,4 @@
-let csrf='', voices={}, allRules=[];
+let csrf='', voices={}, allRules=[], personalLabels={};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...(opts.body?{'Content-Type':'application/json'}:{}),'X-CSRF-Token':csrf,...opts.headers}});if(!r.ok)throw Error((await r.text()).replace(/<[^>]*>/g,' ').trim().slice(0,220));return r.json()}
@@ -6,11 +6,11 @@ function msg(e){$('#message').textContent=e instanceof Error?e.message:e}
 function syncFavorite(){let key='favorite_'+$('#engine').value+'_'+$('#voice').value;$('#favorite').checked=localStorage.getItem(key)==='1'}
 function selectVoices(){
   let e=$('#engine').value, collection=$('#collection').value;
-  $('#collection-control').hidden=e!=='piper';
-  const options=(voices[e]||[]).filter(v=>e!=='piper'||(collection==='mls'?v.startsWith('nl_NL-mls-medium#'):!v.includes('#')));
+  $('#collection-control').hidden=e!=='piper';$('#voice-filter-control').hidden=e!=='piper';$('#voice-label-editor').hidden=e!=='piper';
+  const options=(voices[e]||[]).filter(v=>e!=='piper'||!$('#voice-filter').value||(personalLabels[v]||[]).includes($('#voice-filter').value)).filter(v=>e!=='piper'||(collection==='mls'?v.startsWith('nl_NL-mls-medium#'):!v.includes('#')));
   $('#voice').innerHTML=options.map(v=>`<option value="${esc(v)}">${esc(v.includes('#')?'MLS spreker '+v.split('#')[1]:v)}</option>`).join('');
   let saved=localStorage.getItem('voice_'+e);if(options.includes(saved))$('#voice').value=saved;
-  syncFavorite();
+  syncFavorite();syncLabels();
 }
 $('#collection').onchange=()=>{localStorage.setItem('piper_collection',$('#collection').value);selectVoices()};
 $('#favorite').onchange=()=>localStorage.setItem('favorite_'+$('#engine').value+'_'+$('#voice').value,$('#favorite').checked?'1':'0');
@@ -30,13 +30,13 @@ function loadSettings(){
 for(const key of ['speed','steps','silence'])$('#'+key).addEventListener('input',()=>settingsChanged());
 $('#profile').addEventListener('change',()=>{if($('#profile').value==='custom')settingsChanged(false);else setProfile($('#profile').value)});
 $('#reset-settings').addEventListener('click',()=>setProfile('standard'));
-function syncEngineSettings(){$('#voice-settings').hidden=$('#engine').value!=='supertonic'}
-function selection(){let engine=$('#engine').value;return {engine,voice:$('#voice').value,source:$('#source').value,language:'nl',settings:engine==='supertonic'?readSettings():{}}}
+function syncEngineSettings(){$('#voice-settings').hidden=$('#engine').value!=='supertonic';$('#piper-settings').hidden=$('#engine').value!=='piper'}
+function selection(){let engine=$('#engine').value;return {engine,voice:$('#voice').value,source:$('#source').value,language:'nl',settings:engine==='supertonic'?readSettings():piperSettings()}}
 loadSettings();syncEngineSettings();
-async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();syncEngineSettings();await refresh()}catch(e){msg(e)}}
+async function load(){try{let s=await api('/api/session');if(!s.authenticated)return;csrf=s.csrf;$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;voices=await api('/api/voices');try{personalLabels=await api('/api/voice-labels')}catch(e){personalLabels={}};$('#engine').value=localStorage.getItem('engine')||'piper';selectVoices();syncEngineSettings();await refresh()}catch(e){msg(e)}}
 $('#loginform').onsubmit=async e=>{e.preventDefault();try{csrf=(await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})})).csrf;$('#password').value='';await load()}catch(e){msg(e)}};
 $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload()};
-$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>{localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);syncFavorite()};$('#source').onchange=()=>renderRules();
+$('#engine').onchange=()=>{localStorage.setItem('engine',$('#engine').value);selectVoices();syncEngineSettings()};$('#voice').onchange=()=>{localStorage.setItem('voice_'+$('#engine').value,$('#voice').value);syncFavorite();syncLabels()};$('#source').onchange=()=>renderRules();
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{for(const id of ['lab','dictionary'])$('#'+id).hidden=id!==b.dataset.tab});
 $('#check-whisper').onclick=async()=>{
   const out=$('#whisper-health');out.textContent='Beschikbaarheid controleren…';
@@ -50,7 +50,7 @@ function formatSettings(engine, raw){
     const steps=s.steps ?? s.total_steps;
     const silence=s.silence_duration;
     return 'Spreeksnelheid: '+Math.round(s.speed*100)+'%\nGeneratiestappen: '+steps+(s.total_steps!==undefined?' (historische metadata)':'')+'\nPauze tussen tekstfragmenten: '+(silence===undefined?'niet vastgelegd':Math.round(silence*1000)+' ms');
-  }return 'Instellingen: '+raw}catch(e){return 'Instellingen: '+raw}
+  }if(engine==='piper'&&s.length_scale)return 'Spreeksnelheid: '+Math.round(100/s.length_scale)+'%\nZinpauze: '+Math.round(s.sentence_silence*1000)+' ms\nVariatie: '+s.noise_scale+' / '+s.noise_w+(s.audio_filter?'\nLichte ruisfilter: '+JSON.stringify(s.audio_filter):'');return 'Instellingen: '+raw}catch(e){return 'Instellingen: '+raw}
 }
 // Keep media elements and details nodes attached across background updates.
 const jobCards = new Map(), ruleCards = new Map();
@@ -65,13 +65,14 @@ function updateJobs(jobs){
     const id=String(j.id); let card=jobCards.get(id);
     if(!card){
       card=document.createElement('article');card.className='item';card.dataset.jobId=id;
-      card.innerHTML='<h3></h3><p class="muted"></p><div class="job-audio"></div><details><summary>Tekst en instellingen</summary><p class="original"></p><p class="spoken"></p><pre></pre><p class="quality"></p><button type="button" class="cancel-quality" hidden>Controle stoppen</button></details><label class="quality-controls">Whisper-model <select class="quality-model"><option value="base">Base</option><option value="tiny">Tiny</option><option value="small">Small</option></select></label><button class="quality-start">Controleer audiokwaliteit</button><button class="quality-history">Kwaliteitsrapporten</button><div class="quality-reports"></div><button class="rename">Label wijzigen</button><button class="delete">Verwijderen</button>';
+      card.innerHTML='<h3></h3><p class="muted"></p><div class="job-audio"></div><details><summary>Tekst en instellingen</summary><p class="original"></p><p class="spoken"></p><pre></pre><p class="quality"></p><button type="button" class="cancel-quality" hidden>Controle stoppen</button></details><label class="quality-controls">Whisper-model <select class="quality-model"><option value="base">Base</option><option value="tiny">Tiny</option><option value="small">Small</option></select></label><button class="quality-start">Controleer audiokwaliteit</button><button class="quality-history">Kwaliteitsrapporten</button><div class="quality-reports"></div><button class="filter-audio" hidden>Lichte ruisfilter — bewaar aparte WAV</button><p class="filter-origin"></p><button class="rename">Label wijzigen</button><button class="delete">Verwijderen</button>';
       card.querySelector('.quality-start').onclick=async()=>{try{await api('/api/jobs/'+encodeURIComponent(id)+'/quality',{method:'POST',body:JSON.stringify({model:card.querySelector('.quality-model').value})});msg('Kwaliteitscontrole toegevoegd aan de wachtrij.');refresh()}catch(e){msg(e)}};
       card.querySelector('.quality-history').onclick=()=>showReports(card,id);
       card.querySelector('.rename').onclick=()=>window.renameJob(id);
       card.querySelector('.delete').onclick=()=>window.deleteJob(id);
       container.prepend(card);jobCards.set(id,card);
     }
+    const filter=card.querySelector('.filter-audio');filter.hidden=!(j.status==='done'&&j.engine==='piper'&&j.voice.startsWith('nl_NL-mls-medium')&&!j.parent_id);filter.onclick=async()=>{try{await api('/api/jobs/'+encodeURIComponent(id)+'/filter',{method:'POST',body:JSON.stringify({mode:'light'})});msg('Bewerkte versie in wachtrij; het origineel blijft behouden.');refresh()}catch(e){msg(e)}};card.querySelector('.filter-origin').textContent=j.parent_id?'Afzonderlijk gefilterde versie van opname '+j.parent_id+'. Vergelijk beide spelers; filtering kan verstaanbaarheid verminderen.':'';
     card.querySelector('h3').textContent=j.label||'Naamloze opname';
     card.querySelector('.muted').textContent=`${j.engine} · ${j.voice} · ${j.created_at} · ${j.status} ${j.error||''}`;
     card.querySelector('.original').textContent='Origineel: '+j.original;
@@ -203,3 +204,13 @@ $('#ruleengine').onchange=updateRuleVoices;
 let importRows=[];
 $('#previewimport').onclick=async()=>{try{let f=$('#importfile').files[0];if(!f||f.size>200000)throw Error('Kies een CSV of JSON van maximaal 200 kB');let format=f.name.toLowerCase().endsWith('.json')?'json':f.name.toLowerCase().endsWith('.csv')?'csv':null;if(!format)throw Error('Kies een CSV- of JSON-bestand');importRows=await api('/api/rules/import/preview',{method:'POST',body:JSON.stringify({format,content:await f.text()})});$('#importpreview').textContent=JSON.stringify(importRows,null,2);$('#commitimport').hidden=false}catch(e){msg(e)}};
 $('#commitimport').onclick=async()=>{try{let result=await api('/api/rules/import',{method:'POST',body:JSON.stringify({rows:importRows.filter(r=>!r.duplicate)})});msg(result.imported+' voorstellen geïmporteerd');$('#commitimport').hidden=true;refresh()}catch(e){msg(e)}};
+
+function piperSettings(){return {length_scale:100/Number($('#piper-speed').value),sentence_silence:Number($('#piper-pause').value)/1000,noise_scale:Number($('#piper-noise').value),noise_w:Number($('#piper-noisew').value)}}
+function piperChanged(custom=true){$('#piper-speed-value').value=$('#piper-speed').value+'%';$('#piper-pause-value').value=$('#piper-pause').value+' ms';if(custom)$('#piper-profile').value='custom';localStorage.setItem('piper_settings',JSON.stringify(piperSettings()))}
+function piperPreset(name){const values={standard:[100,300],scripture:[90,350],extra:[85,450]}[name];if(!values)return;$('#piper-speed').value=values[0];$('#piper-pause').value=values[1];$('#piper-noise').value='0.333';$('#piper-noisew').value='0.333';$('#piper-profile').value=name;piperChanged(false)}
+for(const key of ['speed','pause','noise','noisew'])$('#piper-'+key).addEventListener('input',()=>piperChanged());
+$('#piper-profile').onchange=()=>piperPreset($('#piper-profile').value);$('#piper-reset').onclick=()=>piperPreset('standard');
+try{const s=JSON.parse(localStorage.getItem('piper_settings'));if(s&&Number.isFinite(s.length_scale)&&s.length_scale>=1/1.2&&s.length_scale<=1/0.7&&Number.isFinite(s.sentence_silence)&&s.sentence_silence>=0&&s.sentence_silence<=3&&[s.noise_scale,s.noise_w].every(x=>Number.isFinite(x)&&x>=0&&x<=1)){$('#piper-speed').value=Math.round(100/s.length_scale);$('#piper-pause').value=Math.round(s.sentence_silence*1000);$('#piper-noise').value=s.noise_scale;$('#piper-noisew').value=s.noise_w;piperChanged()}}catch(e){}
+function syncLabels(){const labels=personalLabels[$('#voice').value]||[];$('#voice-label-options').innerHTML=['Man','Vrouw','Warm','Helder','Diep','Rustig','Favoriet'].map(x=>`<label><input type="checkbox" value="${x}" ${labels.includes(x)?'checked':''}>${x}</label>`).join('')}
+$('#voice-filter').onchange=selectVoices;
+$('#save-voice-labels').onclick=async()=>{try{const voice=$('#voice').value,labels=[...document.querySelectorAll('#voice-label-options input:checked')].map(x=>x.value);await api('/api/voice-labels',{method:'PUT',body:JSON.stringify({voice,labels})});personalLabels[voice]=labels;msg('Persoonlijke stemlabels bewaard.')}catch(e){msg(e)}};

@@ -16,8 +16,14 @@ def validate_settings(engine, settings):
     if not isinstance(settings, dict):
         raise ValueError('Instellingen moeten een object zijn')
     if engine == 'piper':
-        if settings: raise ValueError('Piper ondersteunt hier geen extra instellingen')
-        return {}
+        defaults={'length_scale':1.0,'sentence_silence':0.3,'noise_scale':0.333,'noise_w':0.333}
+        if set(settings)-set(defaults): raise ValueError('Onbekende Piper-instelling')
+        result={**defaults,**settings}
+        for key,low,high in [('length_scale',1/1.2,1/0.7),('sentence_silence',0,3),('noise_scale',0,1),('noise_w',0,1)]:
+            value=result[key]
+            if type(value) not in (int,float) or not math.isfinite(value) or not low<=value<=high: raise ValueError('Ongeldige Piper-instelling: '+key)
+            result[key]=float(value)
+        return result
     if engine != 'supertonic' or set(settings) - set(SUPERTONIC_DEFAULTS):
         raise ValueError('Onbekende instelling')
     result = {**SUPERTONIC_DEFAULTS, **settings}
@@ -33,7 +39,7 @@ def validate_settings(engine, settings):
 
 def stored_settings(engine, settings):
     # Jobs queued by older releases may use total_steps or omit silence.
-    if engine == 'piper': return {}
+    if engine == 'piper': return validate_settings(engine, settings) if settings and 'total_steps' not in settings else {}
     settings = dict(settings)
     if 'total_steps' in settings:
         settings.setdefault('steps', settings.pop('total_steps'))
@@ -49,13 +55,19 @@ def synthesize(engine, voice, text, language='nl', settings=None):
         response = requests.post(os.getenv('SUPERTONIC_URL', 'http://supertonic:8000') + '/v1/tts', json={'text': text, 'voice': voice, 'lang': language.split('-')[0], **options}, timeout=(10, 1800))
         response.raise_for_status()
         return response.content
-    return asyncio.run(_piper(base_voice, text, speaker if separator else None))
+    return asyncio.run(_piper(base_voice, text, speaker if separator else None, stored_settings('piper',settings or {})))
 
-async def _piper(voice, text, speaker=None):
+async def _piper(voice, text, speaker=None, settings=None):
     import os
     async def run():
         client = AsyncTcpClient(os.getenv('PIPER_HOST', 'piper'), int(os.getenv('PIPER_PORT', '10200')))
         async with client:
+            if settings:
+                from wyoming.event import Event
+                await client.write_event(Event(type='versado-settings',data=settings))
+                ready=await asyncio.wait_for(client.read_event(),10)
+                if ready is None or ready.type!='versado-settings-ready' or ready.data!=settings:
+                    raise RuntimeError('Piper V2-adapter ontbreekt of weigert instellingen; update de Piper-image')
             await client.write_event(Synthesize(text=text, voice=SynthesizeVoice(name=voice, speaker=speaker)).event())
             fmt = None
             chunks = []
