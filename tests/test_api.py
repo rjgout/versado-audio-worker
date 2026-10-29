@@ -543,3 +543,21 @@ def test_piper_health_authorization(client,monkeypatch):
     async def healthy(): return {'ready':True,'reachable':True,'settings_supported':True}
     monkeypatch.setattr(m,'piper_health',healthy)
     assert c.get('/api/piper/health').json['ready']
+
+
+def test_piper_timeout_after_synthesis_keeps_uncertain_error(monkeypatch):
+    from app import engines
+    from wyoming.event import Event
+    seen=[]
+    settings=engines.validate_settings('piper',{})
+    class Client:
+        def __init__(self,*args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def write_event(self,event): seen.append(event.type)
+        async def read_event(self):
+            if len(seen)==1: return Event(type='versado-settings-ready',data=settings)
+            raise TimeoutError()
+    monkeypatch.setattr(engines,'AsyncTcpClient',Client)
+    with pytest.raises(TimeoutError): engines.synthesize('piper','nl_NL-ronnie-medium','tekst',settings=settings)
+    assert seen==['versado-settings','synthesize']
