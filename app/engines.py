@@ -57,17 +57,45 @@ def synthesize(engine, voice, text, language='nl', settings=None):
         return response.content
     return asyncio.run(_piper(base_voice, text, speaker if separator else None, stored_settings('piper',settings or {})))
 
+PIPER_ADAPTER_MESSAGE = ('Piper geeft geen V2-instellingenbevestiging. Controleer in Portainer de Piper-image: '
+    'gebruik ghcr.io/rjgout/versado-audio-worker-piper:sha-71a1e4e2fb6dbff5b46b4d8fc50ea81852502d77 '
+    'in plaats van rhasspy/wyoming-piper:2.5.2. Er is nog geen synthesetekst verstuurd.')
+
+class PiperSettingsError(RuntimeError):
+    """Failure before any synthesis request was sent; no inference was started."""
+
+async def configure_piper(client, settings):
+    from wyoming.event import Event
+    try:
+        await client.write_event(Event(type='versado-settings',data=settings))
+        ready=await asyncio.wait_for(client.read_event(),10)
+        if ready is None or ready.type!='versado-settings-ready' or ready.data!=settings:
+            raise PiperSettingsError(PIPER_ADAPTER_MESSAGE)
+    except (TimeoutError, OSError, ValueError) as error:
+        raise PiperSettingsError(PIPER_ADAPTER_MESSAGE) from error
+
+async def piper_health():
+    import os
+    client=AsyncTcpClient(os.getenv('PIPER_HOST','piper'),int(os.getenv('PIPER_PORT','10200')))
+    async def check():
+        async with client:
+            try:
+                await configure_piper(client, validate_settings('piper',{}))
+                return {'reachable':True,'settings_supported':True,'ready':True}
+            except PiperSettingsError as error:
+                return {'reachable':True,'settings_supported':False,'ready':False,'error':str(error)}
+    try:
+        return await asyncio.wait_for(check(),15)
+    except (OSError,TimeoutError):
+        return {'reachable':False,'settings_supported':False,'ready':False,'error':'Piper niet bereikbaar; controleer container, netwerknaam en poort 10200.'}
+
 async def _piper(voice, text, speaker=None, settings=None):
     import os
     async def run():
         client = AsyncTcpClient(os.getenv('PIPER_HOST', 'piper'), int(os.getenv('PIPER_PORT', '10200')))
         async with client:
             if settings:
-                from wyoming.event import Event
-                await client.write_event(Event(type='versado-settings',data=settings))
-                ready=await asyncio.wait_for(client.read_event(),10)
-                if ready is None or ready.type!='versado-settings-ready' or ready.data!=settings:
-                    raise RuntimeError('Piper V2-adapter ontbreekt of weigert instellingen; update de Piper-image')
+                await configure_piper(client, settings)
             await client.write_event(Synthesize(text=text, voice=SynthesizeVoice(name=voice, speaker=speaker)).event())
             fmt = None
             chunks = []
