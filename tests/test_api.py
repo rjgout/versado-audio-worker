@@ -370,3 +370,61 @@ def test_guard_migration_blocks_legacy_running_job(client):
         assert db.execute('SELECT version FROM schema_version').fetchone()[0]==4
     state=c.get('/api/worker/status').json
     assert state['blocked'] and state['job_id']==jid
+
+
+def test_mls_speaker_inventory_selection_and_rule_priority(client, monkeypatch):
+    import json
+    from app import engines
+    from app.pronunciation import Rule, prepare
+    m, c = client
+    models = m.Path(__import__('os').environ['PIPER_MODELS_DIR'])
+    model = models / 'nl_NL-mls-medium.onnx'
+    model.touch()
+    mapping = {str(1000 + i): i for i in range(52)}
+    model.with_name(model.name + '.json').write_text(json.dumps({'num_speakers':52,'speaker_id_map':mapping}))
+    h=login(c)
+    options=c.get('/api/voices').json['piper']
+    speakers=[x for x in options if '#' in x]
+    assert speakers == ['nl_NL-mls-medium#'+str(1000+i) for i in range(52)]
+    chosen=speakers[7]
+    data={'engine':'piper','voice':chosen,'source':'bofm','text':'Ik, Nephi, ben geboren uit goede ouders'}
+    assert c.post('/api/jobs',json=data,headers=h).status_code==202
+    assert c.get('/api/jobs').json[0]['voice']==chosen
+    assert c.post('/api/jobs',json={**data,'voice':'nl_NL-mls-medium#9999'},headers=h).status_code==400
+    rules=[Rule(1,1,'nl','bofm','Naam','basis',engine='piper',voice='nl_NL-mls-medium'),Rule(2,1,'nl','bofm','Naam','spreker',engine='piper',voice=chosen)]
+    assert prepare('Naam',rules,'nl','bofm','piper',chosen)[0]=='spreker'
+    assert prepare('Naam',rules[:1],'nl','bofm','piper',chosen)[0]=='basis'
+    seen={}
+    async def fake(voice,text,speaker=None):
+        seen.update(voice=voice,text=text,speaker=speaker)
+        return b'WAV'
+    monkeypatch.setattr(engines,'_piper',fake)
+    assert engines.synthesize('piper',chosen,'tekst')==b'WAV'
+    assert seen=={'voice':'nl_NL-mls-medium','text':'tekst','speaker':'1007'}
+
+
+def test_mls_invalid_configuration_not_advertised(client):
+    m,c=client
+    models=m.Path(__import__('os').environ['PIPER_MODELS_DIR'])
+    model=models/'nl_NL-mls-medium.onnx';model.touch()
+    model.with_name(model.name+'.json').write_text('{broken')
+    login(c)
+    assert not any('#' in x for x in c.get('/api/voices').json['piper'])
+
+
+def test_mls_speaker_sent_in_wyoming_event(monkeypatch):
+    from app import engines
+    from wyoming.audio import AudioStart, AudioChunk, AudioStop
+    from wyoming.tts import Synthesize
+    events=iter([AudioStart(rate=22050,width=2,channels=1).event(),AudioChunk(rate=22050,width=2,channels=1,audio=b'\0\0').event(),AudioStop().event()])
+    seen=[]
+    class Client:
+        def __init__(self,*args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def write_event(self,event): seen.append(Synthesize.from_event(event))
+        async def read_event(self): return next(events)
+    monkeypatch.setattr(engines,'AsyncTcpClient',Client)
+    engines.synthesize('piper','nl_NL-mls-medium#2450','tekst')
+    assert seen[0].voice.name=='nl_NL-mls-medium'
+    assert seen[0].voice.speaker=='2450'

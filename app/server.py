@@ -107,7 +107,24 @@ def available_voices():
         supertonic = [v for v in VOICES['supertonic'] if v in advertised]
     except (requests.RequestException, ValueError, KeyError, TypeError):
         supertonic = []
-    return {'piper': [v for v in VOICES['piper'] if v in installed], 'supertonic': supertonic}
+    piper = [v for v in VOICES['piper'] if v in installed]
+    # The model's own mapping is authoritative; never assume the NAS has 52.
+    if 'nl_NL-mls-medium' in installed:
+        for model in root.rglob('nl_NL-mls-medium.onnx'):
+            try:
+                config = json.loads(model.with_name(model.name + '.json').read_text(encoding='utf-8'))
+                mapping = config['speaker_id_map']
+                count = config['num_speakers']
+                if not isinstance(mapping, dict) or type(count) is not int or not 1 <= count <= 10000: break
+                valid = [(name, ident) for name, ident in mapping.items()
+                         if isinstance(name, str) and name.isascii() and name.isdecimal()
+                         and type(ident) is int and 0 <= ident < count]
+                if len(valid) != len(mapping) or len({ident for _, ident in valid}) != len(valid): break
+                piper += ['nl_NL-mls-medium#' + name for name, ident in sorted(valid, key=lambda item: item[1])]
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            break
+    return {'piper': piper, 'supertonic': supertonic}
 
 def bounded(v, name, maximum, required=True):
     if not isinstance(v, str) or len(v) > maximum or (required and not v.strip()):
@@ -171,7 +188,7 @@ def validate_rule(p):
     engine = p.get('engine') or None
     voice = p.get('voice') or None
     if engine and engine not in VOICES: abort(400, 'Ongeldig model')
-    if voice and (not engine or voice not in VOICES[engine]): abort(400, 'Ongeldige stem')
+    if voice and (not engine or (voice not in VOICES[engine] and voice not in available_voices().get(engine, []))): abort(400, 'Ongeldige stem')
     return (language, source, bounded(p.get('original'), 'woord', 120), bounded(p.get('replacement'), 'uitspraak', 120), engine, voice, bounded(p.get('note',''), 'toelichting', 1000, False))
 
 
