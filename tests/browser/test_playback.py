@@ -142,6 +142,7 @@ def test_playback_survives_polling():
             page.locator('#collection').select_option('mls')
             page.locator('#voice').select_option('nl_NL-mls-medium#1724')
             page.locator('#favorite').check()
+            page.locator('#text').fill('Ik, Nephi, ben geboren uit goede ouders')
             page.locator('#generate button[type=submit], #generate button:not([type])').last.click()
             page.wait_for_timeout(200)
             assert sent['job']['voice']=='nl_NL-mls-medium#1724'
