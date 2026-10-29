@@ -15,7 +15,7 @@ import urllib.error
 import wave
 from urllib.parse import urlsplit, parse_qs
 from werkzeug.security import generate_password_hash
-from wyoming.event import read_event, write_event
+from wyoming.event import Event, read_event, write_event
 from wyoming.audio import AudioStart, AudioChunk, AudioStop
 
 entered = threading.Event()
@@ -44,6 +44,10 @@ threading.Thread(target=server.serve_forever,daemon=True).start()
 class PiperHandler(socketserver.StreamRequestHandler):
     def handle(self):
         event=read_event(self.rfile)
+        if not event: return
+        if event.type=='versado-settings':
+            write_event(Event(type='versado-settings-ready',data=event.data),self.wfile)
+            event=read_event(self.rfile)
         if not event: return
         text=event.data.get('text','')
         piper_requests.append(text)

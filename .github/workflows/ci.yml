@@ -21,6 +21,8 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt pytest==8.4.2 ruff==0.14.2
       - run: ruff check --select E9,F63,F7,F82 app tests
+      - name: Install audio test dependency
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: python -m pytest tests --ignore=tests/browser -q
       - run: pip install playwright==1.55.0
       - run: python -m playwright install --with-deps chromium
@@ -73,9 +75,24 @@ jobs:
       - name: Whisper service smoke test (no model download)
         if: steps.changes.outputs.whisper == 'true'
         run: python scripts/smoke_whisper.py
+      - name: Build Piper adapter
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: piper/Dockerfile
+          load: true
+          tags: versado-piper:ci
+          cache-from: type=gha,scope=piper
+          cache-to: type=gha,mode=max,scope=piper
+      - name: Piper adapter test against real synthesis implementation (no model)
+        run: docker run --rm --entrypoint /usr/src/.venv/bin/python3 -v "$PWD/scripts/test_piper_adapter.py:/test_adapter.py:ro" versado-piper:ci /test_adapter.py
       - name: Publish tested images on main
         if: github.event_name == 'push'
         run: |
+          docker tag versado-piper:ci ghcr.io/rjgout/versado-audio-worker-piper:latest
+          docker tag versado-piper:ci ghcr.io/rjgout/versado-audio-worker-piper:sha-${{ github.sha }}
+          docker push ghcr.io/rjgout/versado-audio-worker-piper:latest
+          docker push ghcr.io/rjgout/versado-audio-worker-piper:sha-${{ github.sha }}
           docker push ghcr.io/rjgout/versado-audio-worker:latest
           docker push ghcr.io/rjgout/versado-audio-worker:sha-${{ github.sha }}
           docker tag versado-whisper:ci ghcr.io/rjgout/versado-audio-worker-whisper:latest

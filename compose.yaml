@@ -14,24 +14,24 @@ services:
       WHISPER_URL: http://whisper:8090
       WHISPER_TIMEOUT: ${WHISPER_TIMEOUT:-7200}
     volumes:
-      - /volume1/docker/versado-audio-worker/models:/data/models:ro
-      - /volume1/docker/versado-audio-worker/tests:/data/tests
-      - /volume1/docker/versado-audio-worker/pronunciation:/data/pronunciation
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/models:/data/models:ro
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/tests:/data/tests
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/pronunciation:/data/pronunciation
     mem_limit: ${APP_MEMORY:-512m}
     networks: [internal]
   piper:
-    image: rhasspy/wyoming-piper:2.5.2
+    image: ghcr.io/rjgout/versado-audio-worker-piper:${PIPER_IMAGE_TAG:-latest}
     restart: unless-stopped
     command: ["--voice", "nl_NL-ronnie-medium", "--data-dir", "/data", "--download-dir", "/data", "--uri", "tcp://0.0.0.0:10200", "--local-files-only"]
     volumes:
-      - /volume1/docker/versado-audio-worker/models:/data
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/models:/data
     mem_limit: ${PIPER_MEMORY:-2g}
     networks: [internal]
   supertonic:
     image: k8bit/supertonic:latest
     restart: unless-stopped
     volumes:
-      - /volume1/docker/versado-audio-worker/supertonic-models:/models
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/supertonic-models:/models
     environment:
       SUPERTONIC_MODEL: supertonic-3
     mem_limit: ${SUPERTONIC_MEMORY:-4g}
@@ -43,10 +43,11 @@ services:
       WHISPER_THREADS: ${WHISPER_THREADS:-2}
       WHISPER_TIMEOUT: ${WHISPER_TIMEOUT:-7200}
     volumes:
-      - /volume1/docker/versado-audio-worker/whisper-models:/models:ro
-      - /volume1/docker/versado-audio-worker/pronunciation:/coord
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/whisper-models:/models:ro
+      - ${NAS_ROOT:-/volume2/docker/versado-audio-worker}/pronunciation:/coord
     mem_limit: ${WHISPER_MEMORY:-3g}
     networks: [internal]
 networks:
   internal:
-    driver: bridge
+    name: ${AUDIO_NETWORK:-audio-internal}
+    external: true

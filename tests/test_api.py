@@ -367,7 +367,7 @@ def test_guard_migration_blocks_legacy_running_job(client):
         db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
     m.init()
     with m.db() as db:
-        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==4
+        assert db.execute('SELECT version FROM schema_version').fetchone()[0]==5
     state=c.get('/api/worker/status').json
     assert state['blocked'] and state['job_id']==jid
 
@@ -395,7 +395,7 @@ def test_mls_speaker_inventory_selection_and_rule_priority(client, monkeypatch):
     assert prepare('Naam',rules,'nl','bofm','piper',chosen)[0]=='spreker'
     assert prepare('Naam',rules[:1],'nl','bofm','piper',chosen)[0]=='basis'
     seen={}
-    async def fake(voice,text,speaker=None):
+    async def fake(voice,text,speaker=None,settings=None):
         seen.update(voice=voice,text=text,speaker=speaker)
         return b'WAV'
     monkeypatch.setattr(engines,'_piper',fake)
@@ -428,3 +428,68 @@ def test_mls_speaker_sent_in_wyoming_event(monkeypatch):
     engines.synthesize('piper','nl_NL-mls-medium#2450','tekst')
     assert seen[0].voice.name=='nl_NL-mls-medium'
     assert seen[0].voice.speaker=='2450'
+
+
+def test_piper_settings_snapshot_worker_preview_and_validation(client,monkeypatch):
+    import json
+    from app.engines import validate_settings
+    m,c=client;h=login(c)
+    settings={'length_scale':1.25,'sentence_silence':0.45,'noise_scale':0.2,'noise_w':0.4}
+    data={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'Ik, Nephi, ben geboren uit goede ouders','settings':settings}
+    jid=c.post('/api/jobs',json=data,headers=h).json['id']
+    assert json.loads(c.get('/api/jobs').json[0]['settings'])==settings
+    assert c.post('/api/previews',json={**data,'test_rule':1},headers=h).status_code==202
+    with m.db() as db: db.execute('DELETE FROM jobs WHERE is_preview=1')
+    seen=[]
+    output=io.BytesIO()
+    with wave.open(output,'wb') as wav:
+        wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(22050);wav.writeframes(b'\0\0'*10)
+    monkeypatch.setattr(m,'synthesize',lambda *args:seen.append(args) or output.getvalue())
+    monkeypatch.setattr(m.time,'sleep',lambda _:(_ for _ in ()).throw(SystemExit()))
+    with pytest.raises(SystemExit): m.worker()
+    assert seen[0][-1]==settings and c.get('/api/jobs').json[0]['status']=='done'
+    assert c.get('/api/jobs/'+jid+'/audio').data==output.getvalue()
+    for key,value in [('length_scale',0),('noise_scale',True),('sentence_silence',float('nan')),('noise_w',2)]:
+        with pytest.raises(ValueError): validate_settings('piper',{**settings,key:value})
+
+
+def test_filter_keeps_original_and_labels_persist(client,monkeypatch):
+    import json
+    m,c=client;h=login(c)
+    assert c.put('/api/voice-labels',json={'voice':'nl_NL-ronnie-medium','labels':['Man','Warm']},headers=h).status_code==200
+    assert c.get('/api/voice-labels').json['nl_NL-ronnie-medium']==['Man','Warm']
+    assert c.put('/api/voice-labels',json={'voice':'nl_NL-ronnie-medium','labels':['invented']},headers=h).status_code==400
+    jid=c.post('/api/jobs',json={'engine':'piper','voice':'nl_NL-ronnie-medium','source':'bofm','text':'Nephi'},headers=h).json['id']
+    source=io.BytesIO()
+    with wave.open(source,'wb') as w:
+        w.setnchannels(1);w.setsampwidth(2);w.setframerate(22050);w.writeframes(b'\0\0'*22050)
+    original=source.getvalue();(m.AUDIO/'original.wav').write_bytes(original)
+    with m.db() as db: db.execute("UPDATE jobs SET status='done',voice='nl_NL-mls-medium',audio='original.wav' WHERE id=?",(jid,))
+    assert c.post('/api/jobs/'+jid+'/filter',json={'mode':'light'}).status_code==403
+    child=c.post('/api/jobs/'+jid+'/filter',json={'mode':'light'},headers=h).json['id']
+    assert c.delete('/api/jobs/'+jid,headers=h).status_code==409
+    original_sleep=m.time.sleep
+    def stop_when_idle(seconds):
+        if seconds==1: raise SystemExit()
+        original_sleep(seconds)
+    monkeypatch.setattr(m.time,'sleep',stop_when_idle)
+    with pytest.raises(SystemExit): m.worker()
+    jobs={x['id']:x for x in c.get('/api/jobs').json}
+    assert jobs[child]['status']=='done' and jobs[child]['parent_id']==jid, jobs[child]['error']
+    assert json.loads(jobs[child]['settings'])['audio_filter']['name']=='afftdn'
+    assert (m.AUDIO/'original.wav').read_bytes()==original
+    filtered=c.get('/api/jobs/'+child+'/audio').data
+    with wave.open(io.BytesIO(filtered),'rb') as w: assert w.getnframes()==22050
+    m.init()
+    assert c.get('/api/jobs/'+child+'/audio').data==filtered
+    second=c.post('/api/jobs/'+jid+'/filter',json={'mode':'light'},headers=h).json['id']
+    m.init()  # Queued processing survives restart without touching the WAV.
+    import app.processing
+    def fail(_): raise OSError('opslag niet beschikbaar')
+    monkeypatch.setattr(app.processing,'filter_wav',fail)
+    with pytest.raises(SystemExit): m.worker()
+    jobs={x['id']:x for x in c.get('/api/jobs').json}
+    assert jobs[second]['status']=='failed'
+    assert (m.AUDIO/'original.wav').read_bytes()==original
+    assert c.get('/api/worker/status').json['blocked']
+

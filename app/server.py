@@ -46,8 +46,11 @@ def init():
         INSERT INTO schema_version SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
         CREATE TABLE IF NOT EXISTS rules(id INTEGER PRIMARY KEY, language TEXT NOT NULL, source TEXT NOT NULL, original TEXT NOT NULL, replacement TEXT NOT NULL, engine TEXT, voice TEXT, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, version INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS rule_history(id INTEGER PRIMARY KEY, rule_id INTEGER NOT NULL, version INTEGER NOT NULL, snapshot TEXT NOT NULL, changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS voice_labels(voice TEXT PRIMARY KEY, labels TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, original TEXT NOT NULL, spoken TEXT NOT NULL, engine TEXT NOT NULL, voice TEXT NOT NULL, language TEXT NOT NULL, source TEXT NOT NULL, settings TEXT NOT NULL, rules TEXT NOT NULL, label TEXT NOT NULL, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, audio TEXT);
         ''')
+        if 'parent_id' not in [r['name'] for r in c.execute('PRAGMA table_info(jobs)')]:
+            c.execute('ALTER TABLE jobs ADD COLUMN parent_id TEXT')
         if 'is_preview' not in [r['name'] for r in c.execute('PRAGMA table_info(jobs)')]:
             c.execute('ALTER TABLE jobs ADD COLUMN is_preview INTEGER NOT NULL DEFAULT 0')
             c.execute('UPDATE schema_version SET version=2')
@@ -63,7 +66,7 @@ def init():
             engine TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
         # An older app may have crashed while using a schema without a guard.
         c.execute("INSERT OR IGNORE INTO heavy_tts_guard(singleton,job_id,engine) SELECT 1,id,engine FROM jobs WHERE status='running' ORDER BY rowid LIMIT 1")
-        c.execute('UPDATE schema_version SET version=4 WHERE version < 4')
+        c.execute('UPDATE schema_version SET version=5 WHERE version < 5')
         c.execute("UPDATE quality_tasks SET status='interrupted',error='Controle onderbroken; beëindiging wordt bevestigd.' WHERE status='running'")
         if not c.execute('SELECT 1 FROM rules WHERE id=1').fetchone():
             c.execute("INSERT INTO rules(id,language,source,original,replacement,status,version) VALUES(1,'nl','bofm','Nephi','Nefi','approved',1)")
@@ -429,9 +432,37 @@ def job_update(jid):
             c.execute('UPDATE jobs SET label=? WHERE id=?',(bounded(payload().get('label',''),'label',200,False),jid))
         else:
             if row['status'] in ('queued','running') or c.execute("SELECT 1 FROM quality_tasks WHERE job_id=? AND status IN ('queued','running','interrupted')",(jid,)).fetchone(): abort(409)
+            if c.execute('SELECT 1 FROM jobs WHERE parent_id=?',(jid,)).fetchone(): abort(409,'Verwijder eerst de bewerkte versies')
             c.execute('DELETE FROM jobs WHERE id=?',(jid,))
             if row['audio']: (AUDIO / row['audio']).unlink(missing_ok=True)
     return {'ok':True}
+
+@app.route('/api/voice-labels',methods=['GET','PUT'])
+@protected
+def voice_labels():
+    with db() as c:
+        if request.method=='GET': return {r['voice']:json.loads(r['labels']) for r in c.execute('SELECT * FROM voice_labels')}
+        p=payload(); voice=bounded(p.get('voice'),'stem',150)
+        labels=p.get('labels')
+        allowed={'Man','Vrouw','Warm','Helder','Diep','Rustig','Favoriet'}
+        if not isinstance(labels,list) or len(labels)>7 or any(not isinstance(x,str) or x not in allowed for x in labels): abort(400)
+        if voice not in available_voices()['piper']: abort(400)
+        c.execute('INSERT OR REPLACE INTO voice_labels VALUES(?,?)',(voice,json.dumps(sorted(set(labels)))))
+    return {'ok':True}
+
+@app.post('/api/jobs/<jid>/filter')
+@protected
+def filter_job(jid):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=c.execute("SELECT * FROM jobs WHERE id=? AND status='done' AND is_preview=0",(jid,)).fetchone()
+        if not row or row['engine']!='piper' or not row['voice'].startswith('nl_NL-mls-medium') or row['parent_id']: abort(400)
+        if c.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]>=25: abort(429)
+        if payload().get('mode')!='light': abort(400)
+        settings=json.loads(row['settings']);settings['audio_filter']={'name':'afftdn','nr':6,'nf':-50,'parent_id':jid}
+        ident=uuid.uuid4().hex
+        c.execute('INSERT INTO jobs(id,original,spoken,engine,voice,language,source,settings,rules,label,status,parent_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(ident,row['original'],row['spoken'],row['engine'],row['voice'],row['language'],row['source'],json.dumps(settings),row['rules'],row['label']+' · lichte ruisfilter','queued',jid))
+    return {'id':ident},202
 
 @app.get('/api/jobs/<jid>/audio')
 @protected
@@ -482,7 +513,14 @@ def worker():
                 # A service surviving an app restart therefore cannot overlap TTS.
                 with (DATA/'heavy-work.lock').open('a') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
-                    audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'],stored_settings(row['engine'], json.loads(row['settings'])))
+                    options=json.loads(row['settings'])
+                    if row['parent_id']:
+                        from app.processing import filter_wav
+                        with db() as c: parent=c.execute("SELECT audio FROM jobs WHERE id=? AND status='done'",(row['parent_id'],)).fetchone()
+                        if not parent: raise ValueError('Originele opname ontbreekt')
+                        audio_bytes=filter_wav(AUDIO/parent['audio'])
+                    else:
+                        audio_bytes=synthesize(row['engine'],row['voice'],row['spoken'],row['language'],stored_settings(row['engine'],options))
                     # A complete engine response proves the request ended. Release
                     # only our guard, and keep flock until the DB transaction commits.
                     with db() as c: c.execute('DELETE FROM heavy_tts_guard WHERE singleton=1 AND job_id=?',(row['id'],))

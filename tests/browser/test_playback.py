@@ -37,6 +37,9 @@ def test_playback_survives_polling():
             def routes(route):
                 path = route.request.url.split('?')[0]
                 if path.endswith('/api/session'): result = {'authenticated': True, 'csrf': 'test'}
+                elif path.endswith('/api/voice-labels'):
+                    if route.request.method=='PUT': sent['labels']=route.request.post_data_json; result={'ok':True}
+                    else: result={}
                 elif path.endswith('/api/worker/status'): result = worker
                 elif path.endswith('/api/worker/recover'):
                     sent['recovery'] = route.request.post_data_json; worker['blocked'] = False; result = {'ok':True}
@@ -142,10 +145,19 @@ def test_playback_survives_polling():
             page.locator('#collection').select_option('mls')
             page.locator('#voice').select_option('nl_NL-mls-medium#1724')
             page.locator('#favorite').check()
+            page.locator('#piper-profile').select_option('scripture')
+            assert page.locator('#piper-speed-value').inner_text()=='90%'
+            page.locator('#voice-label-editor summary').click()
+            page.locator('#voice-label-options input[value=Warm]').check()
+            page.locator('#save-voice-labels').click()
+            page.wait_for_timeout(200)
+            assert sent['labels']['labels']==['Warm']
             page.locator('#text').fill('Ik, Nephi, ben geboren uit goede ouders')
             page.locator('#generate button[type=submit], #generate button:not([type])').last.click()
             page.wait_for_timeout(200)
             assert sent['job']['voice']=='nl_NL-mls-medium#1724'
+            assert sent['job']['settings']['length_scale']==100/90
+            assert sent['job']['settings']['sentence_silence']==0.35
             page.reload()
             page.wait_for_selector('#workspace:not([hidden])')
             assert page.locator('#collection').input_value()=='mls'
